@@ -10,9 +10,9 @@
 // de js/app.js ser carregado (útil para hospedagens que injetam config sem
 // tocar no código-fonte).
 
-export const SUPABASE_URL = "";
-export const SUPABASE_ANON_KEY = "";
+export const SUPABASE_URL = "https://xgpvazsqgxczqtbtpafq.supabase.co";
+export const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhncHZhenNxZ3hjenF0YnRwYWZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk0MDAzMjMsImV4cCI6MjEwNDk3NjMyM30.Ap-4j4iVN0YHkPfuMZ9irsuYWN52BBtK7KuemoBiKeI";
 
 // Endpoint da Edge Function que faz o proxy seguro para a API de LLM.
 // Formato esperado: `${SUPABASE_URL}/functions/v1/llm-proxy`
-export const LLM_PROXY_ENDPOINT = "";
+export const LLM_PROXY_ENDPOINT = "https://xgpvazsqgxczqtbtpafq.supabase.co/functions/v1/llm-proxy";

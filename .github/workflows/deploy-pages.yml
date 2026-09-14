@@ -7,6 +7,7 @@ on:
       - "readerlab/**"
       - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
+    # manual retrigger after making the repo public
 
 permissions:
   contents: read
