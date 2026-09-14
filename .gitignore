@@ -1,0 +1,17 @@
+# frontend estático sem build — exclusões padrão de segurança/ferramentas
+
+# segredos / ambiente
+.env
+.env.*
+*.local
+
+# Supabase CLI (estado local)
+supabase/.temp/
+supabase/.branches/
+
+# SO / editor
+.DS_Store
+Thumbs.db
+
+# artefato local não relacionado ao projeto (OneDrive?)
+/readerlab/temp
