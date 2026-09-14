@@ -23,7 +23,7 @@ export const LLM_PROXY_CONFIG = {
   model: "",
   promptVersion: "v1",
   temperature: 0.7,
-  timeoutMs: 90000,
+  timeoutMs: 140000,
 };
 
 // Hook de configuração NÃO-secreta: o endpoint do proxy é apenas uma URL

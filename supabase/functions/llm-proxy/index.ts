@@ -19,7 +19,8 @@ import { corsHeaders, handlePreflight } from "../_shared/cors.ts";
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "gpt-4o-mini";
-const TIMEOUT_MS = 90_000;
+// Supabase Edge Functions free plan wall-clock limit is 150s; stay under it.
+const TIMEOUT_MS = 140_000;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -56,6 +57,14 @@ Deno.serve(async (req: Request) => {
   const model = (typeof body.model === "string" && body.model) || Deno.env.get("LLM_MODEL") || DEFAULT_MODEL;
   const temperature = typeof body.temperature === "number" ? body.temperature : 0.7;
 
+  // kimi-k3 always reasons and only allows the implicit default temperature (1);
+  // sending any other value is rejected with an invalid_request_error.
+  const isKimiK3 = model === "kimi-k3";
+  const payload: Record<string, unknown> = { model, messages };
+  if (!isKimiK3) payload.temperature = temperature;
+  // Default to "low" reasoning effort for snappier responses; caller can override via body.reasoning_effort.
+  if (isKimiK3) payload.reasoning_effort = body.reasoning_effort || "low";
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -67,7 +76,7 @@ Deno.serve(async (req: Request) => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model, temperature, messages }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
   } catch (err) {
