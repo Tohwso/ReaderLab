@@ -8,7 +8,7 @@
 // qualquer segredo — apenas agregados, respostas qualitativas (com
 // truncamento defensivo) e metadados de identificação (código/nome da
 // Persona).
-import * as S from "./store.js";
+import * as S from "../store.js";
 import { computeQuestionStats, computeReactionAggregates, filterPersonasBySegment } from "./populationMetrics.js";
 
 export const ANALYSIS_DATASET_VERSION = 1;
