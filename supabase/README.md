@@ -78,21 +78,47 @@ Faça login com a conta criada no passo 3 (ou 1, para projeto novo).
 
 ## 5. Deploy da Edge Function (proxy de LLM)
 
-A função em [`functions/llm-proxy`](./functions/llm-proxy/index.ts) é
-genérica: fala com qualquer API compatível com o formato de chat
-completions da OpenAI (Kimi/Moonshot, OpenAI, Groq, DeepSeek, etc.).
+A função em [`functions/llm-proxy`](./functions/llm-proxy/index.ts) fala
+com qualquer API compatível com o formato de chat completions da OpenAI
+(Kimi/Moonshot, OpenAI, Groq, DeepSeek, etc.), mas **não é** um proxy
+genérico aberto: é um endpoint restrito ao ReaderLab, com autenticação,
+autorização por dono e CORS por allowlist (ver "Segurança" abaixo).
 
 ```
 supabase functions deploy llm-proxy
-supabase secrets set LLM_API_KEY=sk-...              # obrigatório
-supabase secrets set LLM_API_BASE_URL=https://api.moonshot.cn/v1  # opcional (default: OpenAI)
-supabase secrets set LLM_MODEL=kimi-k3                # opcional (default: gpt-4o-mini)
+supabase secrets set LLM_API_KEY=sk-...                                  # obrigatório
+supabase secrets set LLM_API_BASE_URL=https://api.moonshot.ai/v1         # opcional (default: OpenAI)
+supabase secrets set LLM_MODEL=kimi-k3                                   # opcional (default: gpt-4o-mini)
+supabase secrets set READERLAB_OWNER_USER_ID=<uuid-do-seu-usuario>       # obrigatório
+supabase secrets set READERLAB_ALLOWED_ORIGINS=https://<seu-usuario>.github.io,http://localhost:5173  # obrigatório
 ```
 
 A API key **nunca** entra no frontend nem neste repositório — fica apenas
-nos secrets da função. Mantenha a verificação de JWT ativa (comportamento
-padrão do `supabase functions deploy`): o proxy só aceita chamadas com um
-JWT válido do seu projeto (a sessão do usuário logado cobre isso).
+nos secrets da função.
+
+### Segurança do `llm-proxy`
+
+- **Autenticação:** a função valida o JWT recebido chamando
+  `supabase.auth.getUser(token)` no servidor (não confia apenas em o
+  frontend ter enviado o header `Authorization`). Sem JWT válido → `401`.
+- **Autorização:** fase single-user — só o `auth.uid()` igual a
+  `READERLAB_OWNER_USER_ID` pode executar leituras. Qualquer outro usuário
+  autenticado recebe `403`. Não coloque esse UUID no código-fonte — só no
+  secret.
+- **CORS:** sem `Access-Control-Allow-Origin: *`. Só as origens listadas em
+  `READERLAB_ALLOWED_ORIGINS` (separadas por vírgula) recebem os headers de
+  CORS; outras origens são bloqueadas (`403`) já no preflight.
+- **Modelo/URL fixos no servidor:** o frontend manda apenas
+  `{ systemPrompt, userPrompt, reasoning_effort? }` — nunca `model`,
+  `baseUrl` ou `messages` arbitrários. `LLM_API_BASE_URL`/`LLM_MODEL` só
+  existem como secrets do servidor.
+- **Payload limitado:** `systemPrompt`/`userPrompt` precisam ser strings
+  não vazias, com tamanho máximo (20k/200k caracteres) para evitar abuso
+  acidental; `reasoning_effort`, se enviado, só aceita `low`/`medium`/`high`/`max`.
+- **Resposta enxuta:** `{ content, model, usage? }` — nunca o objeto cru da
+  API de LLM, nem API key, headers do upstream ou stack traces.
+- **Logs:** a função nunca loga o texto do manuscrito/prompt, só código e
+  mensagem curta de erros do upstream.
 
 ## 6. Rodar localmente (opcional)
 

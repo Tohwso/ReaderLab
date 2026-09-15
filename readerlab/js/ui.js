@@ -1247,7 +1247,7 @@ function viewNewRun(main) {
           <div class="field"><label>Prompt version</label><input type="text" value="${esc(cfg.promptVersion)}" disabled></div>
           <div class="field"><label>Temperature</label><input type="text" value="${esc(String(cfg.temperature))}" disabled></div>
         </div>
-        <p class="hint">Definidos em <span class="mono">js/llm/provider.js</span> (e pelo endpoint do proxy). Parâmetros avançados de UI ficam para uma fase posterior.</p>
+        <p class="hint">Provider/model reais são decididos pelo servidor (Edge Function) — o navegador não escolhe modelo/URL. O campo "Model" aqui é só um rótulo; o modelo efetivamente usado aparece no resultado após a execução.</p>
       </details>
 
       <div class="save-bar">
@@ -1303,7 +1303,7 @@ function viewNewRun(main) {
     const mode = runForm.querySelector('input[name="rn-mode"]:checked')?.value || "demo";
     const isDemo = mode === "demo";
     run.provider = isDemo ? "demo-local" : liveCfg.provider;
-    run.model = isDemo ? "simulador-v1" : liveCfg.model;
+    run.model = isDemo ? "simulador-v1" : ""; // preenchido com o modelo real após a resposta do servidor
     run.promptVersion = liveCfg.promptVersion;
     await S.saveRun(run);
 
@@ -1324,8 +1324,9 @@ function viewNewRun(main) {
       const provider = isDemo
         ? new DemoProvider({ persona, attributes: S.state.attributes, reactions: activeReactions, survey })
         : getProvider(liveCfg);
-      const { content } = await provider.complete({ systemPrompt: system, userPrompt: user });
+      const { content, model } = await provider.complete({ systemPrompt: system, userPrompt: user });
       run.rawResponse = content;
+      if (!isDemo && model) run.model = model;
 
       let parsed;
       try {

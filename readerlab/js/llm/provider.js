@@ -17,10 +17,13 @@
 import { getAccessToken, getAnonKey } from "../db.js";
 import { LLM_PROXY_ENDPOINT } from "../config.js";
 
+// provider/model/temperature aqui são só rótulos de exibição — o servidor
+// (Edge Function) é quem decide de fato o modelo/base URL/provider real;
+// o frontend não consegue mais transformá-lo num proxy para outro modelo.
 export const LLM_PROXY_CONFIG = {
   endpoint: LLM_PROXY_ENDPOINT, // ex.: "https://<ref>.supabase.co/functions/v1/llm-proxy"
   provider: "openai-compatible",
-  model: "",
+  model: "(definido pelo servidor)",
   promptVersion: "v1",
   temperature: 0.7,
   timeoutMs: 140000,
@@ -85,15 +88,7 @@ export class KimiProvider {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({
-          provider: this.cfg.provider,
-          model: this.cfg.model,
-          temperature: this.cfg.temperature,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-        }),
+        body: JSON.stringify({ systemPrompt, userPrompt }),
         signal: controller.signal,
       });
     } catch (err) {
@@ -106,8 +101,11 @@ export class KimiProvider {
     clearTimeout(timer);
 
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        throw new ProviderError("AUTH", "Falha de autenticação com a API de LLM (verifique a chave no servidor).");
+      if (res.status === 401) {
+        throw new ProviderError("AUTH", "Sessão inválida ou expirada — faça login novamente.");
+      }
+      if (res.status === 403) {
+        throw new ProviderError("AUTH", "Esta conta não está autorizada a executar leituras com LLM.");
       }
       if (res.status === 429) {
         throw new ProviderError("RATE_LIMIT", "Limite de requisições atingido (rate limit). Aguarde e tente novamente.");
@@ -122,17 +120,11 @@ export class KimiProvider {
       throw new ProviderError("INVALID_JSON", "Resposta inválida do backend LLM (não era JSON).");
     }
 
-    // O proxy normalmente retorna { content: "<texto do modelo>" };
-    // aceitamos também o formato estilo OpenAI para futuros providers.
-    const content =
-      typeof data.content === "string" ? data.content
-      : typeof data?.choices?.[0]?.message?.content === "string" ? data.choices[0].message.content
-      : null;
-
+    const content = typeof data.content === "string" ? data.content : null;
     if (!content || !content.trim()) {
       throw new ProviderError("EMPTY", "O modelo retornou uma resposta vazia.");
     }
-    return { content: content.trim(), raw: data };
+    return { content: content.trim(), model: data.model, usage: data.usage };
   }
 }
 
