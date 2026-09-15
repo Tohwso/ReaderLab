@@ -43,6 +43,18 @@ function json(body: unknown, status: number, headers: Record<string, string>): R
   });
 }
 
+// Retry-After pode vir como segundos (ex.: "20") ou como data HTTP (ex.:
+// "Wed, 21 Oct 2026 07:28:00 GMT") — normaliza para segundos a partir de
+// agora. Retorna null quando ausente/não interpretável.
+function parseRetryAfterSeconds(value: string | null): number | null {
+  if (!value) return null;
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber) && asNumber >= 0) return asNumber;
+  const asDate = Date.parse(value);
+  if (!Number.isNaN(asDate)) return Math.max(0, Math.round((asDate - Date.now()) / 1000));
+  return null;
+}
+
 async function getAuthenticatedUser(req: Request) {
   const authHeader = req.headers.get("authorization") || "";
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
@@ -183,10 +195,26 @@ Deno.serve(async (req: Request) => {
 
   if (!upstream.ok) {
     // 7) Nunca repassar o corpo/headers crus do upstream (podem conter
-    // detalhes internos do provedor) — só um código e uma mensagem curta.
+    // detalhes internos do provedor) — só código, mensagem curta, o
+    // error.type (quando presente, ex.: "rate_limit_reached_error" /
+    // "engine_overloaded_error" / "exceeded_current_quota_error" da Kimi —
+    // usado pelo frontend para diferenciar erros transitórios de
+    // permanentes) e o Retry-After em segundos (quando presente).
     const message = typeof data?.error?.message === "string" ? data.error.message : "Falha ao chamar a API de LLM.";
-    console.error("llm-proxy upstream_error", upstream.status, message);
-    return json({ error: "upstream_error", status: upstream.status, message }, upstream.status, cors);
+    const errorType = typeof data?.error?.type === "string" ? data.error.type : undefined;
+    const retryAfterSeconds = parseRetryAfterSeconds(upstream.headers.get("retry-after"));
+    console.error("llm-proxy upstream_error", upstream.status, errorType || "(sem type)", message);
+    return json(
+      {
+        error: "upstream_error",
+        status: upstream.status,
+        message,
+        ...(errorType ? { errorType } : {}),
+        ...(retryAfterSeconds != null ? { retryAfterSeconds } : {}),
+      },
+      upstream.status,
+      cors
+    );
   }
 
   const content = data?.choices?.[0]?.message?.content;

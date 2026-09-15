@@ -10,6 +10,8 @@ import { getProvider, getLLMConfig, ProviderError, providerErrorMessage } from "
 import { buildReadingPrompt } from "./llm/promptBuilder.js";
 import { validateLLMResponse } from "./llm/validate.js";
 import { DemoProvider } from "./llm/demoProvider.js";
+import { runWithRetry } from "./llm/retry.js";
+import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
 
 // Executa uma ReadingRun já criada (persistida em PENDING) até seu status
 // final (COMPLETED|FAILED). Nunca lança para o chamador: falhas do
@@ -51,7 +53,34 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     const provider = isDemo
       ? new DemoProvider({ persona, attributes: attributeCatalog, reactions: activeReactions, survey })
       : getProvider(liveCfg);
-    const { content, model } = await provider.complete({ systemPrompt: system, userPrompt: user });
+
+    // Retry automático só para falhas TRANSITÓRIAS do provider (rate limit,
+    // sobrecarga, rede, timeout, erro de servidor — ver llm/errorTypes.js).
+    // Erros permanentes (auth, cota, request inválido) propagam já na 1ª
+    // tentativa. A ReadingRun permanece "RUNNING" durante as tentativas —
+    // nunca vira FAILED só por causa de um 429/503 isolado (critério de
+    // aceite desta funcionalidade).
+    const { content, model } = await runWithRetry(
+      () => provider.complete({ systemPrompt: system, userPrompt: user }),
+      {
+        classify: (err) => ({ errorType: err?.errorType || LLM_ERROR_TYPES.UNKNOWN, retryAfterMs: err?.retryAfterMs || 0 }),
+        onAttempt: async ({ attempt, ok, errorType, retryable, error }) => {
+          run.attemptCount = attempt;
+          run.lastAttemptAt = D.nowISO();
+          run.lastErrorType = ok ? null : errorType;
+          run.lastErrorMessage = ok ? "" : sanitizeErrorMessage(providerErrorMessage(error));
+          await S.saveRun(run);
+          if (!ok) {
+            // Log distingue falha definitiva de falha transitória — nunca
+            // imprime o manuscrito/prompt, só id/tipo/tentativa.
+            console.warn(
+              `[ReadingRun ${run.id}] tentativa ${attempt} falhou (${errorType}) — ` +
+              (retryable ? "transitória, será repetida." : "falha definitiva, sem retry.")
+            );
+          }
+        },
+      }
+    );
     run.rawResponse = content;
     if (!isDemo && model) {
       run.model = model;
@@ -62,11 +91,11 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     try {
       parsed = JSON.parse(content);
     } catch (_) {
-      throw new ProviderError("INVALID_JSON", "O modelo retornou um JSON inválido.");
+      throw new ProviderError("INVALID_JSON", "O modelo retornou um JSON inválido.", { errorType: LLM_ERROR_TYPES.INVALID_RESPONSE });
     }
     const validation = validateLLMResponse(parsed, { reactions: activeReactions, survey });
     if (!validation.ok) {
-      throw new ProviderError("INVALID_SCHEMA", "Resposta fora do schema: " + validation.errors.join(" | "));
+      throw new ProviderError("INVALID_SCHEMA", "Resposta fora do schema: " + validation.errors.join(" | "), { errorType: LLM_ERROR_TYPES.INVALID_RESPONSE });
     }
 
     run.status = "COMPLETED";
@@ -77,8 +106,13 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
   } catch (err) {
     run.status = "FAILED";
     run.completedAt = D.nowISO();
-    run.errorMessage = providerErrorMessage(err);
+    run.lastErrorType = err?.errorType || run.lastErrorType || LLM_ERROR_TYPES.UNKNOWN;
+    run.lastErrorMessage = sanitizeErrorMessage(providerErrorMessage(err));
+    run.lastAttemptAt = D.nowISO();
+    if (!run.attemptCount) run.attemptCount = 1;
+    run.errorMessage = providerErrorMessage(err) + (run.attemptCount > 1 ? ` (após ${run.attemptCount} tentativa(s))` : "");
     await S.saveRun(run);
+    console.error(`[ReadingRun ${run.id}] falha definitiva (${run.lastErrorType}) após ${run.attemptCount} tentativa(s).`);
     return { ok: false, run, error: err };
   }
 }

@@ -16,6 +16,8 @@
 
 import { getAccessToken, getAnonKey } from "../db.js";
 import { LLM_PROXY_ENDPOINT } from "../config.js";
+import { LLM_ERROR_TYPES, classifyHttpErrorResponse } from "./errorTypes.js";
+export { LLM_ERROR_TYPES } from "./errorTypes.js";
 
 // provider/model/temperature aqui são só rótulos de exibição — o servidor
 // (Edge Function) é quem decide de fato o modelo/base URL/provider real;
@@ -43,10 +45,12 @@ export function getLLMConfig() {
 }
 
 export class ProviderError extends Error {
-  constructor(code, message, detail) {
+  constructor(code, message, { errorType = LLM_ERROR_TYPES.UNKNOWN, retryAfterMs = null, detail } = {}) {
     super(message);
     this.name = "ProviderError";
-    this.code = code; // NOT_CONFIGURED | NETWORK | TIMEOUT | AUTH | RATE_LIMIT | HTTP | INVALID_JSON | INVALID_SCHEMA | EMPTY
+    this.code = code; // rótulo específico legado (NOT_CONFIGURED | NETWORK | TIMEOUT | AUTH | HTTP | INVALID_JSON | INVALID_SCHEMA | EMPTY)
+    this.errorType = errorType; // taxonomia interna (ver llm/errorTypes.js) — usada para decidir retry
+    this.retryAfterMs = retryAfterMs; // Retry-After (ms) informado pela API, quando disponível
     this.detail = detail;
   }
 }
@@ -69,7 +73,8 @@ export class KimiProvider {
     if (!this.cfg.endpoint) {
       throw new ProviderError(
         "NOT_CONFIGURED",
-        "Nenhum backend LLM configurado. Conecte um proxy seguro (com a API Key no servidor) para executar leituras reais."
+        "Nenhum backend LLM configurado. Conecte um proxy seguro (com a API Key no servidor) para executar leituras reais.",
+        { errorType: LLM_ERROR_TYPES.INVALID_REQUEST }
       );
     }
 
@@ -94,35 +99,48 @@ export class KimiProvider {
     } catch (err) {
       clearTimeout(timer);
       if (err && err.name === "AbortError") {
-        throw new ProviderError("TIMEOUT", `A chamada à LLM excedeu o limite de ${Math.round(this.cfg.timeoutMs / 1000)}s.`);
+        throw new ProviderError("TIMEOUT", `A chamada à LLM excedeu o limite de ${Math.round(this.cfg.timeoutMs / 1000)}s.`, { errorType: LLM_ERROR_TYPES.TIMEOUT });
       }
-      throw new ProviderError("NETWORK", "Falha de rede ao contatar o backend LLM.");
+      throw new ProviderError("NETWORK", "Falha de rede ao contatar o backend LLM.", { errorType: LLM_ERROR_TYPES.NETWORK_ERROR });
     }
     clearTimeout(timer);
 
     if (!res.ok) {
-      if (res.status === 401) {
-        throw new ProviderError("AUTH", "Sessão inválida ou expirada — faça login novamente.");
-      }
-      if (res.status === 403) {
-        throw new ProviderError("AUTH", "Esta conta não está autorizada a executar leituras com LLM.");
-      }
-      if (res.status === 429) {
-        throw new ProviderError("RATE_LIMIT", "Limite de requisições atingido (rate limit). Aguarde e tente novamente.");
-      }
-      throw new ProviderError("HTTP", `O backend retornou erro HTTP ${res.status}.`);
+      // O corpo pode trazer `errorType` (error.type do provider, repassado
+      // pelo proxy) e `retryAfterSeconds` (Retry-After da API) — ambos
+      // opcionais; nunca contém API key/JWT/payload sensível (ver proxy).
+      let body = null;
+      try { body = await res.json(); } catch (_) { /* corpo não-JSON — segue sem detalhe extra */ }
+
+      const errorType = res.status === 401 || res.status === 403
+        ? LLM_ERROR_TYPES.AUTH_ERROR
+        : classifyHttpErrorResponse(res.status, body);
+      const retryAfterMs = typeof body?.retryAfterSeconds === "number" && body.retryAfterSeconds > 0
+        ? body.retryAfterSeconds * 1000
+        : null;
+
+      const message =
+        errorType === LLM_ERROR_TYPES.AUTH_ERROR ? (res.status === 401 ? "Sessão inválida ou expirada — faça login novamente." : "Esta conta não está autorizada a executar leituras com LLM.")
+        : errorType === LLM_ERROR_TYPES.RATE_LIMIT ? "Limite de requisições atingido (rate limit). Aguarde e tente novamente."
+        : errorType === LLM_ERROR_TYPES.ENGINE_OVERLOADED ? "O modelo está sobrecarregado no momento. Tentando novamente."
+        : errorType === LLM_ERROR_TYPES.QUOTA_EXCEEDED ? "Cota da API de LLM excedida — verifique o plano/billing do provedor."
+        : errorType === LLM_ERROR_TYPES.TIMEOUT ? "A API de LLM não respondeu a tempo."
+        : typeof body?.message === "string" ? body.message
+        : `O backend retornou erro HTTP ${res.status}.`;
+
+      throw new ProviderError("HTTP", message, { errorType, retryAfterMs });
     }
 
     let data;
     try {
       data = await res.json();
     } catch (_) {
-      throw new ProviderError("INVALID_JSON", "Resposta inválida do backend LLM (não era JSON).");
+      throw new ProviderError("INVALID_JSON", "Resposta inválida do backend LLM (não era JSON).", { errorType: LLM_ERROR_TYPES.SERVER_ERROR });
     }
 
     const content = typeof data.content === "string" ? data.content : null;
     if (!content || !content.trim()) {
-      throw new ProviderError("EMPTY", "O modelo retornou uma resposta vazia.");
+      throw new ProviderError("EMPTY", "O modelo retornou uma resposta vazia.", { errorType: LLM_ERROR_TYPES.SERVER_ERROR });
     }
     return { content: content.trim(), model: data.model, usage: data.usage };
   }

@@ -2246,6 +2246,13 @@ export function blankRun() {
     requestMetadata: {},
     executionSnapshot: null, // preenchido por buildExecutionSnapshot() antes de chamar a LLM
     populationRunId: null, // preenchido quando esta ReadingRun foi disparada por uma PopulationRun
+    // Metadata de retry (ver js/llm/retry.js) — nunca inclui API keys/JWT/
+    // payload sensível, só o suficiente para diagnosticar falhas transitórias
+    // vs. permanentes (ver js/llm/errorTypes.js).
+    attemptCount: 0,
+    lastErrorType: null, // um dos LLM_ERROR_TYPES, ou null se nunca falhou
+    lastErrorMessage: "",
+    lastAttemptAt: null,
   };
 }
 

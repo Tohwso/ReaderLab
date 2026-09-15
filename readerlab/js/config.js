@@ -16,3 +16,21 @@ export const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiO
 // Endpoint da Edge Function que faz o proxy seguro para a API de LLM.
 // Formato esperado: `${SUPABASE_URL}/functions/v1/llm-proxy`
 export const LLM_PROXY_ENDPOINT = "https://xgpvazsqgxczqtbtpafq.supabase.co/functions/v1/llm-proxy";
+
+// Retry/backoff para chamadas à LLM (ver js/llm/retry.js) — única fonte de
+// verdade destes defaults; nunca hardcodear em engine.js/provider.js.
+// Sobrescrevível em runtime sem rebuild, mesmo padrão do endpoint acima:
+// window.READERLAB_LLM_MAX_ATTEMPTS / ..._RETRY_BASE_DELAY_MS / ..._RETRY_MAX_DELAY_MS.
+function numberOverride(windowKey, fallback) {
+  try {
+    if (typeof window !== "undefined" && window[windowKey] != null) {
+      const n = Number(window[windowKey]);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  } catch (_) { /* ambiente sem window */ }
+  return fallback;
+}
+
+export const LLM_MAX_ATTEMPTS = numberOverride("READERLAB_LLM_MAX_ATTEMPTS", 6);
+export const LLM_RETRY_BASE_DELAY_MS = numberOverride("READERLAB_LLM_RETRY_BASE_DELAY_MS", 2000);
+export const LLM_RETRY_MAX_DELAY_MS = numberOverride("READERLAB_LLM_RETRY_MAX_DELAY_MS", 120000);
