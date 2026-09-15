@@ -121,6 +121,10 @@ create table if not exists runs (
   survey_id text generated always as (data->>'surveyId') stored,
   status text generated always as (data->>'status') stored,
   population_run_id text generated always as (data->>'populationRunId') stored,
+  -- Projeção de data->>'nextRetryAt' (ver js/domain.js/blankRun) — permite
+  -- localizar ReadingRuns em WAITING_RETRY sem carregar a tabela inteira;
+  -- `data` continua sendo a única fonte de verdade, isto é só um índice.
+  next_retry_at timestamptz generated always as ((data->>'nextRetryAt')::timestamptz) stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -129,6 +133,7 @@ create index if not exists runs_persona_idx on runs (persona_id);
 create index if not exists runs_survey_idx on runs (survey_id);
 create index if not exists runs_status_idx on runs (status);
 create index if not exists runs_population_run_idx on runs (population_run_id);
+create index if not exists runs_next_retry_at_idx on runs (next_retry_at) where status = 'WAITING_RETRY';
 
 -- ------------------------------------------------------- population_runs
 -- Orquestra N ReadingRuns (uma por Persona de uma Population) sobre o

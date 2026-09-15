@@ -2222,6 +2222,7 @@ export function buildSeedPersona(def, catalog) {
 export const RUN_STATUS = {
   PENDING: "Pendente",
   RUNNING: "Executando",
+  WAITING_RETRY: "Aguardando nova tentativa",
   COMPLETED: "Concluída",
   FAILED: "Falhou",
 };
@@ -2237,7 +2238,7 @@ export function blankRun() {
     provider: "kimi",
     model: "kimi-k3",
     promptVersion: "v1",
-    status: "PENDING", // PENDING | RUNNING | COMPLETED | FAILED
+    status: "PENDING", // PENDING | RUNNING | WAITING_RETRY | COMPLETED | FAILED
     createdAt: t,
     startedAt: null,
     completedAt: null,
@@ -2246,13 +2247,14 @@ export function blankRun() {
     requestMetadata: {},
     executionSnapshot: null, // preenchido por buildExecutionSnapshot() antes de chamar a LLM
     populationRunId: null, // preenchido quando esta ReadingRun foi disparada por uma PopulationRun
-    // Metadata de retry (ver js/llm/retry.js) — nunca inclui API keys/JWT/
-    // payload sensível, só o suficiente para diagnosticar falhas transitórias
-    // vs. permanentes (ver js/llm/errorTypes.js).
+    // Metadata de retry (ver js/llm/retry.js) — persistida para que uma
+    // espera por retry sobreviva a um refresh (nunca depende só da memória
+    // da aba); nunca inclui API keys/JWT/payload sensível (ver errorTypes.js).
     attemptCount: 0,
     lastErrorType: null, // um dos LLM_ERROR_TYPES, ou null se nunca falhou
     lastErrorMessage: "",
     lastAttemptAt: null,
+    nextRetryAt: null, // preenchido quando status === WAITING_RETRY; ISO timestamp da próxima tentativa
   };
 }
 

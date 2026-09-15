@@ -1212,6 +1212,7 @@ function viewExecutePopulation(main, popId) {
 const RUN_STATE_META = {
   PENDING: { icon: "○", label: "Aguardando", cls: "neutral" },
   RUNNING: { icon: "●", label: "Executando…", cls: "accent" },
+  WAITING_RETRY: { icon: "⏳", label: "Aguardando nova tentativa", cls: "warn" },
   COMPLETED: { icon: "✓", label: "Concluído", cls: "ok" },
   FAILED: { icon: "✕", label: "Falhou", cls: "bad" },
 };
@@ -1261,7 +1262,7 @@ function viewPopulationRunDetail(main, popRunId, query = {}) {
               <span>${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}</span>
             </div>
             <div class="pr-status-side">
-              <span class="badge ${meta.cls}">${meta.label}</span>
+              <span class="badge ${meta.cls}">${meta.label}${status === "WAITING_RETRY" && run?.nextRetryAt ? ` (nova tentativa em ~${Math.max(0, Math.round((new Date(run.nextRetryAt).getTime() - Date.now()) / 1000))}s)` : ""}</span>
               ${status === "COMPLETED" ? `<a class="btn btn-sm" href="#/execucoes/${run.id}?from=population-runs/${popRun.id}">Ver resultado</a>` : ""}
               ${status === "FAILED" ? `<button type="button" class="btn btn-sm btn-ghost" data-toggle-err="${run.id}">Ver erro</button>` : ""}
             </div>
@@ -2455,7 +2456,7 @@ const surveyLabel = (id, snapshotSurvey) => {
   return s ? s.name : "(pesquisa removida)";
 };
 const runStatusBadge = (status) => {
-  const cls = { COMPLETED: "ok", FAILED: "bad", RUNNING: "accent", PENDING: "neutral" }[status] || "neutral";
+  const cls = { COMPLETED: "ok", FAILED: "bad", RUNNING: "accent", WAITING_RETRY: "warn", PENDING: "neutral" }[status] || "neutral";
   return `<span class="badge ${cls}">${D.RUN_STATUS[status] || esc(status)}</span>`;
 };
 

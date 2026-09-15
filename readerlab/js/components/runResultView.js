@@ -18,7 +18,7 @@ const fmtDuration = (a, b) => {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}min ${s % 60}s`;
 };
 const runStatusBadge = (status) => {
-  const cls = { COMPLETED: "ok", FAILED: "bad", RUNNING: "accent", PENDING: "neutral" }[status] || "neutral";
+  const cls = { COMPLETED: "ok", FAILED: "bad", RUNNING: "accent", WAITING_RETRY: "warn", PENDING: "neutral" }[status] || "neutral";
   return `<span class="badge ${cls}">${D.RUN_STATUS[status] || esc(status)}</span>`;
 };
 const reactionPolarityBadge = (pol) => {

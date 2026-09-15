@@ -21,7 +21,7 @@ import {
   classifyHttpStatus,
   classifyHttpErrorResponse,
 } from "./errorTypes.js";
-import { computeBackoffDelayMs, runWithRetry } from "./retry.js";
+import { computeBackoffDelayMs, runWithRetry, waitUntil, RetryCancelledError } from "./retry.js";
 
 let passed = 0;
 async function test(name, fn) {
@@ -210,6 +210,127 @@ await test("V) esgota maxAttempts em falha persistente e propaga o erro final", 
     /SERVER_ERROR/
   );
   assert.equal(calls, 3);
+});
+
+// ----------------------------------------------------- retry persistente (WAITING_RETRY)
+await test("W) waitUntil retorna assim que o timestamp já passou (sem dormir de verdade)", async () => {
+  let slept = 0;
+  const cancelled = await waitUntil(Date.now() - 1000, { sleepFn: async (ms) => { slept += ms; } });
+  assert.equal(cancelled, false);
+  assert.equal(slept, 0);
+});
+
+// waitUntil/initialWaitUntil são baseados no relógio real (Date.now()) por
+// design — o objetivo é sobreviver a um refresh, então NÃO há um "relógio
+// falso" injetável. Os testes abaixo usam uma espera real, porém minúscula
+// (dezenas de ms), para não deixar a suíte lenta.
+const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+await test("X) waitUntil dorme em pedaços pequenos (nunca um timeout único gigante) até o timestamp", async () => {
+  const chunks = [];
+  const target = Date.now() + 60;
+  await waitUntil(target, {
+    chunkMs: 20,
+    sleepFn: async (ms) => { chunks.push(ms); await realSleep(ms); },
+  });
+  // nunca dorme mais que chunkMs de uma vez, mesmo a espera total sendo maior
+  assert.ok(chunks.every((ms) => ms <= 20));
+  assert.ok(chunks.length >= 2, `esperava >=2 pedaços, teve ${chunks.length}`);
+  assert.ok(Date.now() >= target);
+});
+
+await test("Y) waitUntil interrompe na hora se isCancelled() já é true", async () => {
+  let slept = 0;
+  const cancelled = await waitUntil(Date.now() + 999999, {
+    isCancelled: () => true,
+    sleepFn: async (ms) => { slept += ms; },
+  });
+  assert.equal(cancelled, true);
+  assert.equal(slept, 0);
+});
+
+await test("Z) onWaitingRetry é chamado com { attempt, errorType, nextRetryAt } antes de esperar", async () => {
+  let calls = 0;
+  const waits = [];
+  const result = await runWithRetry(
+    () => { calls++; return calls === 1 ? Promise.reject(fakeError(LLM_ERROR_TYPES.RATE_LIMIT)) : Promise.resolve({ content: "ok" }); },
+    {
+      classify, sleepFn: async () => {},
+      onWaitingRetry: (info) => waits.push(info),
+    }
+  );
+  assert.deepEqual(result, { content: "ok" });
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0].attempt, 1);
+  assert.equal(waits[0].errorType, LLM_ERROR_TYPES.RATE_LIMIT);
+  assert.ok(typeof waits[0].nextRetryAt === "number" && waits[0].nextRetryAt > Date.now() - 1);
+});
+
+await test("AA) beforeAttempt é chamado antes de CADA tentativa, inclusive a 1ª", async () => {
+  const seen = [];
+  let calls = 0;
+  await runWithRetry(
+    () => { calls++; return calls < 2 ? Promise.reject(fakeError(LLM_ERROR_TYPES.RATE_LIMIT)) : Promise.resolve({ content: "ok" }); },
+    { classify, sleepFn: async () => {}, beforeAttempt: (n) => seen.push(n) }
+  );
+  assert.deepEqual(seen, [1, 2]);
+});
+
+await test("BB) startAttempt/initialWaitUntil retomam sem reiniciar a contagem de tentativas", async () => {
+  let calls = 0;
+  const attempts = [];
+  // Simula uma ReadingRun que já falhou 2x antes do refresh (attemptCount=2)
+  // e cujo next_retry_at já passou — a retomada deve continuar a partir da
+  // tentativa 3, nunca reiniciar em 1.
+  const result = await runWithRetry(
+    () => { calls++; return Promise.resolve({ content: "ok-retomado" }); },
+    {
+      classify, sleepFn: async () => {},
+      startAttempt: 3,
+      initialWaitUntil: Date.now() - 1000,
+      onAttempt: (info) => attempts.push(info),
+    }
+  );
+  assert.deepEqual(result, { content: "ok-retomado" });
+  assert.equal(calls, 1);
+  assert.equal(attempts[0].attempt, 3);
+});
+
+await test("CC) initialWaitUntil no futuro é respeitado antes da 1ª tentativa retomada", async () => {
+  const target = Date.now() + 60;
+  await runWithRetry(
+    () => Promise.resolve({ content: "ok" }),
+    {
+      classify, sleepFn: realSleep,
+      startAttempt: 2,
+      initialWaitUntil: target,
+    }
+  );
+  assert.ok(Date.now() >= target);
+});
+
+await test("DD) isCancelled() durante a espera lança RetryCancelledError (nunca marca falha definitiva)", async () => {
+  let calls = 0;
+  await assert.rejects(
+    runWithRetry(
+      () => { calls++; return Promise.reject(fakeError(LLM_ERROR_TYPES.RATE_LIMIT)); },
+      { classify, sleepFn: async () => {}, isCancelled: () => true }
+    ),
+    (err) => err instanceof RetryCancelledError && err.cancelled === true
+  );
+  assert.equal(calls, 1); // só a 1ª tentativa rodou; a espera pelo retry foi cancelada
+});
+
+await test("EE) isCancelled() durante initialWaitUntil (retomada) também lança RetryCancelledError sem tentar de novo", async () => {
+  let calls = 0;
+  await assert.rejects(
+    runWithRetry(
+      () => { calls++; return Promise.resolve({ content: "nao deveria chegar aqui" }); },
+      { classify, sleepFn: async () => {}, startAttempt: 3, initialWaitUntil: Date.now() + 5000, isCancelled: () => true }
+    ),
+    (err) => err instanceof RetryCancelledError
+  );
+  assert.equal(calls, 0);
 });
 
 console.log(`\n${passed} teste(s) passaram.`);

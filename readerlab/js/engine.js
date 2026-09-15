@@ -13,11 +13,21 @@ import { DemoProvider } from "./llm/demoProvider.js";
 import { runWithRetry } from "./llm/retry.js";
 import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
 
-// Executa uma ReadingRun já criada (persistida em PENDING) até seu status
-// final (COMPLETED|FAILED). Nunca lança para o chamador: falhas do
-// provider/validação viram run.status = "FAILED" + run.errorMessage — quem
-// chama decide o que fazer a seguir (ex.: continuar as próximas personas de
-// uma PopulationRun mesmo que esta tenha falhado).
+// Executa uma ReadingRun até seu status final (COMPLETED|FAILED) — ou a
+// deixa estacionada em WAITING_RETRY aguardando `run.nextRetryAt` (ver
+// abaixo). Nunca lança para o chamador: falhas do provider/validação viram
+// run.status = "FAILED" + run.errorMessage — quem chama decide o que fazer
+// a seguir (ex.: continuar as próximas personas de uma PopulationRun mesmo
+// que esta tenha falhado).
+//
+// RETOMADA: se `run.status` já for "WAITING_RETRY" ao entrar aqui (ex.: a
+// aba foi recarregada enquanto esperava, e o chamador — runPopulationLoop —
+// passou de novo esta mesma run), NÃO reinicia: aproveita attemptCount/
+// nextRetryAt já persistidos, espera só o tempo restante (ou nada, se
+// nextRetryAt já passou) e continua a contagem de tentativas de onde parou.
+// Isso é o que torna o retry independente da memória da aba (critério de
+// aceite) — a fonte de verdade é sempre o que está salvo na ReadingRun, não
+// o estado de uma Promise em memória.
 //
 // `attributes`/`reactions` são OPCIONAIS: quando fornecidos (execução
 // disparada por uma PopulationRun), esta ReadingRun NUNCA consulta
@@ -26,10 +36,18 @@ import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
 // catálogo/reações ATUAIS quando ausentes, o que só acontece na execução
 // avulsa de uma única ReadingRun (ui.js/viewNewRun), que sempre deve
 // refletir o cadastro vigente.
-export async function executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg }) {
-  run.status = "RUNNING";
-  run.startedAt = D.nowISO();
-  await S.saveRun(run);
+//
+// `isCancelled()` (opcional): checado enquanto aguarda um retry — se true,
+// interrompe a espera sem marcar a run como FAILED (ver runPopulationLoop:
+// usado para que uma PopulationRun cancelada nunca inicie uma nova
+// tentativa de uma ReadingRun que estava em WAITING_RETRY).
+export async function executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg, isCancelled = () => false }) {
+  const isResume = run.status === "WAITING_RETRY";
+  if (!isResume) {
+    run.status = "RUNNING";
+    run.startedAt = run.startedAt || D.nowISO();
+    await S.saveRun(run);
+  }
 
   const isDemo = mode === "demo";
   const attributeCatalog = attributes || S.state.attributes;
@@ -57,13 +75,33 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     // Retry automático só para falhas TRANSITÓRIAS do provider (rate limit,
     // sobrecarga, rede, timeout, erro de servidor — ver llm/errorTypes.js).
     // Erros permanentes (auth, cota, request inválido) propagam já na 1ª
-    // tentativa. A ReadingRun permanece "RUNNING" durante as tentativas —
-    // nunca vira FAILED só por causa de um 429/503 isolado (critério de
-    // aceite desta funcionalidade).
+    // tentativa. A cada falha transitória, a run vai para WAITING_RETRY com
+    // um next_retry_at persistido (nunca um setTimeout como única fonte de
+    // verdade) — nunca vira FAILED só por causa de um 429/503 isolado
+    // (critério de aceite desta funcionalidade).
     const { content, model } = await runWithRetry(
       () => provider.complete({ systemPrompt: system, userPrompt: user }),
       {
+        startAttempt: (run.attemptCount || 0) + 1,
+        initialWaitUntil: isResume && run.nextRetryAt ? new Date(run.nextRetryAt).getTime() : null,
+        isCancelled,
         classify: (err) => ({ errorType: err?.errorType || LLM_ERROR_TYPES.UNKNOWN, retryAfterMs: err?.retryAfterMs || 0 }),
+        beforeAttempt: async () => {
+          if (run.status !== "RUNNING") {
+            run.status = "RUNNING";
+            run.nextRetryAt = null;
+            await S.saveRun(run);
+          }
+        },
+        onWaitingRetry: async ({ attempt, errorType, nextRetryAt }) => {
+          run.status = "WAITING_RETRY";
+          run.attemptCount = attempt;
+          run.lastErrorType = errorType;
+          run.nextRetryAt = new Date(nextRetryAt).toISOString();
+          run.lastAttemptAt = D.nowISO();
+          await S.saveRun(run);
+          console.warn(`[ReadingRun ${run.id}] aguardando retry após tentativa ${attempt} (${errorType}) — próxima tentativa às ${run.nextRetryAt}.`);
+        },
         onAttempt: async ({ attempt, ok, errorType, retryable, error }) => {
           run.attemptCount = attempt;
           run.lastAttemptAt = D.nowISO();
@@ -104,8 +142,17 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     await S.saveResult({ ...D.blankResult(run.id), ...validation.value });
     return { ok: true, run };
   } catch (err) {
+    if (err?.cancelled) {
+      // PopulationRun cancelada enquanto esta ReadingRun aguardava um retry
+      // — não é uma falha: a run permanece exatamente como estava persistida
+      // (WAITING_RETRY, attemptCount/nextRetryAt intactos), só não tenta de
+      // novo (ver isCancelled acima e cancelPopulationRun).
+      console.warn(`[ReadingRun ${run.id}] retry interrompido: execução cancelada.`);
+      return { ok: false, run, error: err };
+    }
     run.status = "FAILED";
     run.completedAt = D.nowISO();
+    run.nextRetryAt = null;
     run.lastErrorType = err?.errorType || run.lastErrorType || LLM_ERROR_TYPES.UNKNOWN;
     run.lastErrorMessage = sanitizeErrorMessage(providerErrorMessage(err));
     run.lastAttemptAt = D.nowISO();
@@ -162,6 +209,11 @@ async function runPopulationLoop(popRun, { mode, liveCfg, onProgress }) {
 
     const existing = S.getReadingRunsForPopulationRun(popRun.id).find((r) => r.personaId === persona.id);
     if (existing && (existing.status === "COMPLETED" || existing.status === "FAILED")) continue;
+    // existing.status === "WAITING_RETRY" cai adiante de propósito: é assim
+    // que uma retomada (executePopulationRun/resumePopulationRun após um
+    // refresh) volta a esperar/tentar essa mesma ReadingRun em vez de criar
+    // uma nova (ver executeReadingRun, que detecta isso e não reinicia
+    // attemptCount).
 
     let run = existing;
     if (!run) {
@@ -178,7 +230,8 @@ async function runPopulationLoop(popRun, { mode, liveCfg, onProgress }) {
       await S.saveRun(run);
     }
     onProgress?.({ phase: "start", persona, run, total });
-    const { ok } = await executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg });
+    const isCancelled = () => (S.state.populationRuns.find((p) => p.id === popRun.id) || popRun).status === "CANCELLED";
+    const { ok } = await executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg, isCancelled });
     onProgress?.({ phase: "done", persona, run, ok, total });
 
     // O modelo efetivamente usado só é conhecido após a 1ª resposta real do
