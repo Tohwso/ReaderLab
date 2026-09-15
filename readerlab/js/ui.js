@@ -1335,7 +1335,9 @@ const HUB_TABS = [
 ];
 
 // Presets iniciais referenciados por SLUG do atributo (nunca por ID) — só
-// aparecem se o atributo correspondente existir no catálogo atual.
+// aparecem se o atributo correspondente existir nas AttributeDefinitions
+// desta execução (snapshot congelado, ou catálogo atual apenas como
+// fallback legado — ver resolvePresetRules dentro do hub).
 const BUILTIN_SEGMENT_PRESETS = [
   { name: "Plot-driven", ruleDefs: [{ slug: "orientacao-a-enredo", op: ">=", value: 70 }] },
   { name: "Character-driven", ruleDefs: [{ slug: "orientacao-a-personagens", op: ">=", value: 70 }] },
@@ -1363,6 +1365,17 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   const completed = runs.filter((r) => r.status === "COMPLETED").length;
   const failed = runs.filter((r) => r.status === "FAILED").length;
 
+  // AttributeDefinitions desta execução: snapshot congelado primeiro,
+  // catálogo atual só como fallback legado (ver D.resolvePopulationSnapshotAttributes)
+  // — nomes/descrições/grupos/escala exibidos aqui NUNCA mudam com edições
+  // futuras do catálogo para uma PopulationRun já executada com snapshot.
+  // `legacyFallback` é recalculado aqui (não só lido de popRun.legacyAttributeFallback)
+  // porque PopulationRuns concluídas antes desta verificação de analytics
+  // nunca tiveram esse campo persistido — o banner de aviso precisa refletir
+  // a fonte REAL usada nesta visualização, não só o que foi persistido durante a execução.
+  const { attributes: runAttributes, legacyFallback: attributesLegacyFallback } = D.resolvePopulationSnapshotAttributes(popRun, S.state.attributes);
+  const runAttributeById = new Map(runAttributes.map((a) => [a.id, a]));
+
   let activeTab = HUB_TABS.some(([key]) => key === initialTab) ? initialTab : "resumo";
   let heatmapSort = { by: "code", dir: "asc" };
   let questionStatsSort = "mean_desc";
@@ -1382,25 +1395,28 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   const runReportLink = (runId) => `#/execucoes/${runId}?from=population-runs/${popRun.id}&tab=${encodeURIComponent(activeTab)}`;
 
   // Atributos elegíveis para regras de segmento: só os que ao menos uma
-  // Persona desta execução tem explicitamente configurados.
+  // Persona desta execução tem explicitamente configurados — resolvidos
+  // via snapshot (nunca via S.state.attributes diretamente).
   const ruleAttributeOptions = () => {
     const ids = new Set();
     snapshotPersonas.forEach((p) => Object.keys(p.attributeValues || {}).forEach((id) => ids.add(id)));
     return [...ids]
-      .map((id) => S.state.attributes.find((a) => a.id === id))
+      .map((id) => runAttributeById.get(id))
       .filter(Boolean)
       .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
   };
 
-  // Resolve os slugs de um preset contra o catálogo atual de atributos —
-  // preset só fica disponível se TODOS os atributos referenciados existirem.
+  // Resolve os slugs de um preset contra as AttributeDefinitions desta
+  // execução (snapshot/fallback legado) — preset só fica disponível se
+  // TODOS os atributos referenciados existirem nesse conjunto.
   const resolvePresetRules = (ruleDefs) => {
     const rules = ruleDefs.map((rd) => {
-      const attribute = S.state.attributes.find((a) => a.slug === rd.slug);
+      const attribute = runAttributes.find((a) => a.slug === rd.slug);
       return attribute ? { attributeId: attribute.id, op: rd.op, value: rd.value } : null;
     });
     return rules.every(Boolean) ? rules : null;
   };
+
 
   const availablePresets = () => [
     ...BUILTIN_SEGMENT_PRESETS.map((p) => ({ name: p.name, rules: resolvePresetRules(p.ruleDefs) })).filter((p) => p.rules),
@@ -2014,7 +2030,7 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
         `${esc(population?.name || "—")} · ${total} leitor(es)${survey ? " · " + esc(survey.name) : ""}`,
         `<a class="btn" href="#/populacoes">Voltar às populações</a>`
       )}
-      ${popRun.legacyAttributeFallback ? `
+      ${(popRun.legacyAttributeFallback || attributesLegacyFallback) ? `
       <div class="info-box warn" style="margin-bottom:14px"><span>⚠</span><span>Execução anterior ao congelamento de AttributeDefinitions (snapshot legado) — atributos exibidos aqui vêm do catálogo atual, não de um snapshot original.</span></div>` : ""}
       <div class="card" style="margin-bottom:18px">
         <div class="q-meta" style="margin-bottom:6px">

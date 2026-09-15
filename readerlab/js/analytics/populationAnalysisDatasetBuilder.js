@@ -9,9 +9,17 @@
 // truncamento defensivo) e metadados de identificação (código/nome da
 // Persona).
 import * as S from "../store.js";
+import * as D from "../domain.js";
 import { computeQuestionStats, computeReactionAggregates, filterPersonasBySegment } from "./populationMetrics.js";
 
 export const ANALYSIS_DATASET_VERSION = 1;
+
+// Rótulo seguro para um attributeId presente em `persona.attributeValues`/
+// regra de segmento mas que não pôde ser resolvido nem pelo snapshot nem
+// pelo fallback legado (ex.: atributo excluído do catálogo atual de uma
+// PopulationRun anterior à snapshotVersion 2). Nunca inventa a definição
+// original — apenas evita quebrar a página, preservando o id bruto.
+const attributeUnavailableLabel = (attributeId) => `Atributo histórico não disponível (${attributeId})`;
 
 const MAX_ANSWER_CHARS = 600; // por resposta qualitativa individual
 const MAX_REASON_CHARS = 300; // por motivo de reação relatado
@@ -35,6 +43,14 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
   const getResult = S.getResultForRun;
   const completedRuns = runs.filter((r) => r.status === "COMPLETED");
   const failedRuns = runs.filter((r) => r.status === "FAILED");
+
+  // AttributeDefinitions desta execução: SEMPRE o snapshot congelado quando
+  // existir (PopulationRuns novas) — só cai para o catálogo atual em
+  // PopulationRuns anteriores à snapshotVersion 2 (ver domain.js). O
+  // Research Analyst nunca deve ver nomes/descrições/grupos que mudaram
+  // depois da execução.
+  const { attributes: runAttributes, legacyFallback: attributeCatalogLegacyFallback } = D.resolvePopulationSnapshotAttributes(popRun, S.state.attributes);
+  const attributeById = new Map(runAttributes.map((a) => [a.id, a]));
 
   const truncatedFields = [];
 
@@ -100,8 +116,8 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
     if (!persona || !result) return null;
     const attributes = {};
     Object.keys(persona.attributeValues || {}).forEach((attrId) => {
-      const attr = S.state.attributes.find((a) => a.id === attrId);
-      if (attr) attributes[attr.name] = persona.attributeValues[attrId];
+      const attr = attributeById.get(attrId);
+      attributes[attr ? attr.name : attributeUnavailableLabel(attrId)] = persona.attributeValues[attrId];
     });
     return {
       personaCode: persona.code || null,
@@ -128,7 +144,7 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
     return {
       name: seg.name,
       rules: seg.rules.map((r) => ({
-        attributeName: S.state.attributes.find((a) => a.id === r.attributeId)?.name || r.attributeId,
+        attributeName: attributeById.get(r.attributeId)?.name || attributeUnavailableLabel(r.attributeId),
         op: r.op,
         value: Number(r.value),
       })),
@@ -186,5 +202,6 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
     segments: segmentSummaries,
     segmentComparisons,
     truncatedFields,
+    attributeCatalogLegacyFallback, // true só para PopulationRuns anteriores à snapshotVersion 2 (ver domain.js)
   };
 }
