@@ -39,10 +39,11 @@ function tryParseJSON(str) {
 }
 
 // ---------------------------------------------------------------- Cabeçalho
-function renderRunHeader(run, persona, survey) {
+function renderRunHeader(run, persona, survey, backContext) {
   const personaName = persona ? `${persona.code ? esc(persona.code) + " — " : ""}${esc(persona.name)}` : "(persona removida)";
   return `
     <div class="card run-report-header">
+      ${backContext?.breadcrumb?.length ? `<div class="breadcrumb">${backContext.breadcrumb.map((b) => esc(b)).join(' <span class="faint">›</span> ')}</div>` : ""}
       <div class="run-report-head-top">
         <div>
           <h1 style="font-size:21px;margin-bottom:6px">${esc(run.title || "Resultado da leitura")}</h1>
@@ -53,7 +54,7 @@ function renderRunHeader(run, persona, survey) {
           </div>
         </div>
         <div class="head-actions">
-          <a class="btn" href="#/execucoes">Voltar às execuções</a>
+          <a class="btn" href="${backContext?.href || "#/execucoes"}">${esc(backContext?.label || "Voltar às execuções")}</a>
           <button type="button" class="btn" id="rr-copy-json">Copiar JSON</button>
           <button type="button" class="btn" id="rr-download-json">Baixar JSON</button>
         </div>
@@ -311,7 +312,7 @@ function renderErrorPanel(run) {
 }
 
 // ================================================================= Entrada
-export function renderRunResultView(main, run, result, { toast } = {}) {
+export function renderRunResultView(main, run, result, { toast, backContext } = {}) {
   const snap = run.executionSnapshot || null;
   const survey = snap?.survey || S.state.surveys.find((s) => s.id === run.surveyId);
   const persona = snap?.persona || S.state.personas.find((p) => p.id === run.personaId);
@@ -338,7 +339,7 @@ export function renderRunResultView(main, run, result, { toast } = {}) {
   ` : "";
 
   main.innerHTML = `
-    ${renderRunHeader(run, persona, survey)}
+    ${renderRunHeader(run, persona, survey, backContext)}
     ${run.status === "FAILED" ? renderErrorPanel(run) : ""}
     ${legacyNotice}
     ${missingResultNotice}

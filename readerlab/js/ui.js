@@ -185,8 +185,10 @@ let activePoll = null;
 export function renderRoute() {
   if (activePoll) { clearInterval(activePoll); activePoll = null; }
   const hash = location.hash || "#/dashboard";
-  $$("#nav .nav-item").forEach((a) => a.classList.toggle("active", a.dataset.nav === hash || (a.dataset.nav !== "#/dashboard" && hash.startsWith(a.dataset.nav))));
-  const parts = hash.replace(/^#\//, "").split("/");
+  const [pathPart, queryStr] = hash.split("?");
+  const query = Object.fromEntries(new URLSearchParams(queryStr || ""));
+  $$("#nav .nav-item").forEach((a) => a.classList.toggle("active", a.dataset.nav === pathPart || (a.dataset.nav !== "#/dashboard" && pathPart.startsWith(a.dataset.nav))));
+  const parts = pathPart.replace(/^#\//, "").split("/");
   const route = parts[0] || "dashboard";
   const param = parts[1] ? decodeURIComponent(parts[1]) : null;
   const main = $("#main");
@@ -200,11 +202,11 @@ export function renderRoute() {
     case "pesquisas": return param ? viewSurveyEditor(main, param) : viewSurveys(main);
     case "execucoes":
       if (param === "nova") return viewNewRun(main);
-      return param ? viewRunDetail(main, param) : viewRuns(main);
+      return param ? viewRunDetail(main, param, query) : viewRuns(main);
     case "populacoes":
       if (param && parts[2] === "executar") return viewExecutePopulation(main, param);
       return viewPopulations(main);
-    case "population-runs": return viewPopulationRunDetail(main, param);
+    case "population-runs": return viewPopulationRunDetail(main, param, query);
     case "tags": return viewTags(main);
     case "dados": return viewData(main);
     default: return viewDashboard(main);
@@ -1217,7 +1219,7 @@ function populationRunStatusBadge(status) {
   return `<span class="badge ${cls}">${esc(D.POPULATION_RUN_STATUS[status] || status)}</span>`;
 }
 
-function viewPopulationRunDetail(main, popRunId) {
+function viewPopulationRunDetail(main, popRunId, query = {}) {
   let resumeAttempted = false;
   let hubMounted = false;
 
@@ -1256,7 +1258,7 @@ function viewPopulationRunDetail(main, popRunId) {
             </div>
             <div class="pr-status-side">
               <span class="badge ${meta.cls}">${meta.label}</span>
-              ${status === "COMPLETED" ? `<a class="btn btn-sm" href="#/execucoes/${run.id}">Ver resultado</a>` : ""}
+              ${status === "COMPLETED" ? `<a class="btn btn-sm" href="#/execucoes/${run.id}?from=population-runs/${popRun.id}">Ver resultado</a>` : ""}
               ${status === "FAILED" ? `<button type="button" class="btn btn-sm btn-ghost" data-toggle-err="${run.id}">Ver erro</button>` : ""}
             </div>
           </div>
@@ -1304,7 +1306,7 @@ function viewPopulationRunDetail(main, popRunId) {
     // é montado uma única vez (troca de aba não precisa de novo polling).
     if (!hubMounted) {
       hubMounted = true;
-      renderPopulationRunHub(main, popRun);
+      renderPopulationRunHub(main, popRun, { initialTab: query.tab });
     }
   };
 
@@ -1337,7 +1339,7 @@ function populationRunBundle(popRun) {
 // nunca lista perguntas por nome fixo, sempre a partir da Survey congelada.
 const HEATMAP_QUESTION_TYPES = new Set(["scale", "number"]);
 
-function renderPopulationRunHub(main, popRun) {
+function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   const population = S.state.populations.find((p) => p.id === popRun.populationId);
   const survey = S.state.surveys.find((s) => s.id === popRun.surveyId) || popRun.executionSnapshot?.survey || null;
   const snapshotSurvey = popRun.executionSnapshot?.survey || survey;
@@ -1348,12 +1350,16 @@ function renderPopulationRunHub(main, popRun) {
   const completed = runs.filter((r) => r.status === "COMPLETED").length;
   const failed = runs.filter((r) => r.status === "FAILED").length;
 
-  let activeTab = "resumo";
+  let activeTab = HUB_TABS.some(([key]) => key === initialTab) ? initialTab : "resumo";
   let heatmapSort = { by: "code", dir: "asc" };
   let questionStatsSort = "mean_desc";
   let reactionsSort = { by: "freq", dir: "desc" };
   let reactionsShowZero = false;
   let openReactionCodes = new Set();
+
+  // Link contextual para o relatório individual — preserva de onde veio
+  // (esta PopulationRun + aba atual) para o botão "Voltar" funcionar.
+  const runReportLink = (runId) => `#/execucoes/${runId}?from=population-runs/${popRun.id}&tab=${encodeURIComponent(activeTab)}`;
 
   // Colunas dinâmicas: perguntas quantitativas (scale/number) da Survey
   // congelada no snapshot — nunca por nome fixo.
@@ -1361,12 +1367,23 @@ function renderPopulationRunHub(main, popRun) {
 
   // Estatísticas por pergunta (N, média, mediana, faixa, desvio populacional
   // e Índice de Divergência) — só sobre respostas válidas dos leitores que
-  // concluíram a leitura; ausência de resposta nunca vira zero.
+  // concluíram a leitura; ausência de resposta nunca vira zero. Guarda quem
+  // deu o maior/menor valor para permitir navegar até o leitor de origem.
   const questionStats = () => heatmapQuestions.map((q) => {
-    const values = runs
+    const entries = runs
       .filter((r) => r.status === "COMPLETED")
-      .map((r) => S.getResultForRun(r.id)?.surveyAnswers.find((a) => a.questionId === q.id)?.value);
-    return { question: q, stats: describeQuestionValues(values, { min: q.min ?? 0, max: q.max ?? 100 }) };
+      .map((r) => {
+        const ans = S.getResultForRun(r.id)?.surveyAnswers.find((a) => a.questionId === q.id);
+        if (!ans || typeof ans.value !== "number") return null;
+        return { run: r, persona: snapshotPersonas.find((p) => p.id === r.personaId), value: ans.value };
+      })
+      .filter(Boolean);
+    const stats = describeQuestionValues(entries.map((e) => e.value), { min: q.min ?? 0, max: q.max ?? 100 });
+    return {
+      question: q, stats,
+      maxEntry: stats.n ? entries.find((e) => e.value === stats.max) : null,
+      minEntry: stats.n ? entries.find((e) => e.value === stats.min) : null,
+    };
   });
 
   const sortedQuestionStats = () => {
@@ -1384,6 +1401,14 @@ function renderPopulationRunHub(main, popRun) {
     return list;
   };
 
+  // Rótulo + link de um leitor destacado (maior/menor valor) — a Persona é
+  // sempre clicável até seu relatório individual.
+  const outlierLink = (entry) => {
+    if (!entry?.run) return "";
+    const label = entry.persona ? `${entry.persona.code ? esc(entry.persona.code) + " — " : ""}${esc(entry.persona.name)}` : "(persona removida)";
+    return `<div class="qstat-outlier"><a href="${runReportLink(entry.run.id)}">${label}</a></div>`;
+  };
+
   const renderQuestionStatsCards = () => {
     const list = sortedQuestionStats();
     return `
@@ -1398,7 +1423,7 @@ function renderPopulationRunHub(main, popRun) {
         <span class="hint" title="Índice comparativo interno baseado na dispersão das respostas.">ⓘ o que é divergência?</span>
       </div>
       <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:18px">
-        ${list.map(({ question, stats }) => `
+        ${list.map(({ question, stats, maxEntry, minEntry }) => `
           <div class="card qstat-card">
             <div class="qstat-title">${esc(question.text)}</div>
             ${stats.n === 0
@@ -1406,7 +1431,10 @@ function renderPopulationRunHub(main, popRun) {
               : `
                 <div class="qstat-row"><span>Média</span><b class="mono">${Math.round(stats.mean)}</b></div>
                 <div class="qstat-row"><span>Mediana</span><b class="mono">${Math.round(stats.median)}</b></div>
-                <div class="qstat-row"><span>Faixa</span><b class="mono">${stats.min}–${stats.max}</b></div>
+                <div class="qstat-row"><span>Maior valor</span><b class="mono">${stats.max}</b></div>
+                ${outlierLink(maxEntry)}
+                <div class="qstat-row"><span>Menor valor</span><b class="mono">${stats.min}</b></div>
+                ${outlierLink(minEntry)}
                 <div class="qstat-row"><span>Desvio (populacional)</span><b class="mono">${Math.round(stats.standardDeviation)}</b></div>
                 ${stats.divergence != null
                   ? `<div class="qstat-row"><span>Divergência</span><b class="mono">${Math.round(stats.divergence * 100)}%</b></div>
@@ -1472,7 +1500,11 @@ function renderPopulationRunHub(main, popRun) {
           <tbody>
             ${rows.map(({ persona, run, values }) => `
               <tr>
-                <td class="heatmap-persona-cell">${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}${run?.status === "FAILED" ? ` <span class="badge bad">Falhou</span>` : ""}</td>
+                <td class="heatmap-persona-cell">
+                  <span>${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}</span>
+                  ${run?.status === "FAILED" ? ` <span class="badge bad">Falhou</span>` : ""}
+                  ${run ? `<a class="heatmap-persona-link" href="${runReportLink(run.id)}">Ver relatório</a>` : ""}
+                </td>
                 ${heatmapQuestions.map((q, i) => {
                   const val = values[i];
                   if (val == null || typeof val !== "number") {
@@ -1486,7 +1518,8 @@ function renderPopulationRunHub(main, popRun) {
                     data-persona="${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}"
                     data-question="${esc(q.text)}"
                     data-value="${val}"
-                    data-max="${max}">${esc(String(val))}</td>`;
+                    data-max="${max}"
+                    data-run="${run.id}">${esc(String(val))}</td>`;
                 }).join("")}
               </tr>`).join("")}
           </tbody>
@@ -1540,7 +1573,7 @@ function renderPopulationRunHub(main, popRun) {
               </div>
             </div>
             <div class="pr-status-side">
-              <a class="btn btn-sm" href="#/execucoes/${run.id}">Ver relatório individual</a>
+              <a class="btn btn-sm" href="${runReportLink(run.id)}">Ver relatório individual</a>
             </div>
           </div>`).join("")}
       </div>`;
@@ -1642,7 +1675,7 @@ function renderPopulationRunHub(main, popRun) {
               </div>
               <div class="pr-status-side">
                 <span class="badge ${meta.cls}">${meta.label}</span>
-                ${run ? `<a class="btn btn-sm" href="#/execucoes/${run.id}">Ver relatório individual</a>` : ""}
+                ${run ? `<a class="btn btn-sm" href="${runReportLink(run.id)}">Ver relatório individual</a>` : ""}
               </div>
             </div>`;
           }).join("")}
@@ -1718,7 +1751,8 @@ function renderPopulationRunHub(main, popRun) {
         box.innerHTML = `
           <div class="heatmap-detail-persona">${esc(cell.dataset.persona)}</div>
           <div class="heatmap-detail-question">${esc(cell.dataset.question)}</div>
-          <div class="heatmap-detail-value">${esc(cell.dataset.value)} / ${esc(cell.dataset.max)}</div>`;
+          <div class="heatmap-detail-value">${esc(cell.dataset.value)} / ${esc(cell.dataset.max)}</div>
+          ${cell.dataset.run ? `<a class="btn btn-sm" style="margin-top:8px" href="${runReportLink(cell.dataset.run)}">Abrir leitura completa</a>` : ""}`;
       }));
     }
 
@@ -2040,9 +2074,33 @@ function viewNewRun(main) {
   });
 }
 
-function viewRunDetail(main, id) {
+function viewRunDetail(main, id, query = {}) {
   const run = S.state.runs.find((r) => r.id === id);
   if (!run) { location.hash = "#/execucoes"; return; }
   const result = S.getResultForRun(run.id);
-  renderRunResultView(main, run, result, { toast });
+  renderRunResultView(main, run, result, { toast, backContext: buildRunBackContext(run, query) });
+}
+
+// Se a leitura veio do hub de uma PopulationRun (via link com ?from=...),
+// preserva o caminho (e a aba) de volta em vez de só "Voltar às execuções".
+// Também funciona sem query (ex.: reload direto no link), usando
+// run.populationRunId como fallback.
+function buildRunBackContext(run, query) {
+  const from = query?.from || (run.populationRunId ? `population-runs/${run.populationRunId}` : null);
+  if (!from || !from.startsWith("population-runs/")) return null;
+  const popRun = S.state.populationRuns.find((p) => p.id === from.slice("population-runs/".length));
+  if (!popRun) return null;
+  const population = S.state.populations.find((p) => p.id === popRun.populationId);
+  const persona = popRun.executionSnapshot?.personas?.find((p) => p.id === run.personaId)
+    || S.state.personas.find((p) => p.id === run.personaId);
+  const tab = query?.tab;
+  return {
+    href: `#/population-runs/${popRun.id}${tab ? "?tab=" + encodeURIComponent(tab) : ""}`,
+    label: "Voltar para resultados da população",
+    breadcrumb: [
+      population?.name || "Population",
+      popRun.title || "Execução de população",
+      persona ? `${persona.code ? persona.code + " — " : ""}${persona.name}` : null,
+    ].filter(Boolean),
+  };
 }
