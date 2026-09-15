@@ -1332,9 +1332,14 @@ function populationRunBundle(popRun) {
   return { populationRun: popRun, readingRuns, readingResults };
 }
 
+// Tipos de pergunta com valor numérico comparável entre leitores — a matriz
+// nunca lista perguntas por nome fixo, sempre a partir da Survey congelada.
+const HEATMAP_QUESTION_TYPES = new Set(["scale", "number"]);
+
 function renderPopulationRunHub(main, popRun) {
   const population = S.state.populations.find((p) => p.id === popRun.populationId);
   const survey = S.state.surveys.find((s) => s.id === popRun.surveyId) || popRun.executionSnapshot?.survey || null;
+  const snapshotSurvey = popRun.executionSnapshot?.survey || survey;
   const snapshotPersonas = popRun.executionSnapshot?.personas || [];
   const total = snapshotPersonas.length;
   const runs = S.getReadingRunsForPopulationRun(popRun.id);
@@ -1343,6 +1348,87 @@ function renderPopulationRunHub(main, popRun) {
   const failed = runs.filter((r) => r.status === "FAILED").length;
 
   let activeTab = "resumo";
+  let heatmapSort = { by: "code", dir: "asc" };
+
+  // Colunas dinâmicas: perguntas quantitativas (scale/number) da Survey
+  // congelada no snapshot — nunca por nome fixo.
+  const heatmapQuestions = (snapshotSurvey?.questions || []).filter((q) => HEATMAP_QUESTION_TYPES.has(q.type));
+
+  const heatmapRows = () => snapshotPersonas.map((persona) => {
+    const run = runByPersona.get(persona.id);
+    const result = run && run.status === "COMPLETED" ? S.getResultForRun(run.id) : null;
+    const values = heatmapQuestions.map((q) => {
+      const ans = result?.surveyAnswers.find((a) => a.questionId === q.id);
+      return ans ? ans.value : null;
+    });
+    return { persona, run, values };
+  });
+
+  const sortedHeatmapRows = () => {
+    const rows = heatmapRows();
+    const { by, dir } = heatmapSort;
+    const mul = dir === "desc" ? -1 : 1;
+    const qIdx = by.startsWith("q:") ? heatmapQuestions.findIndex((q) => q.id === by.slice(2)) : -1;
+    rows.sort((a, b) => {
+      let av, bv;
+      if (by === "code") { av = a.persona.code || ""; bv = b.persona.code || ""; }
+      else if (by === "name") { av = a.persona.name || ""; bv = b.persona.name || ""; }
+      else { av = qIdx >= 0 ? a.values[qIdx] : null; bv = qIdx >= 0 ? b.values[qIdx] : null; }
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1; // sem valor sempre por último, em qualquer direção
+      if (bv == null) return -1;
+      if (typeof av === "string") return av.localeCompare(bv, "pt-BR") * mul;
+      return (av - bv) * mul;
+    });
+    return rows;
+  };
+
+  const renderHeatmapTab = () => {
+    if (!heatmapQuestions.length) {
+      return `<div class="empty-state"><div class="big">Sem perguntas quantitativas</div><p>Esta Survey não possui perguntas do tipo escala ou número para comparar visualmente.</p></div>`;
+    }
+    const rows = sortedHeatmapRows();
+    return `
+      <div class="heatmap-toolbar">
+        <label class="hint" for="heatmap-sort-by">Ordenar por</label>
+        <select id="heatmap-sort-by">
+          <option value="code" ${heatmapSort.by === "code" ? "selected" : ""}>Código da persona</option>
+          <option value="name" ${heatmapSort.by === "name" ? "selected" : ""}>Nome da persona</option>
+          ${heatmapQuestions.map((q) => `<option value="q:${q.id}" ${heatmapSort.by === "q:" + q.id ? "selected" : ""}>${esc(q.text)}</option>`).join("")}
+        </select>
+        <button type="button" class="btn btn-sm" id="heatmap-sort-dir">${heatmapSort.dir === "asc" ? "↑ Crescente" : "↓ Decrescente"}</button>
+      </div>
+      <div class="table-wrap heatmap-table-wrap">
+        <table class="heatmap-table">
+          <thead><tr>
+            <th>Persona</th>
+            ${heatmapQuestions.map((q) => `<th title="${esc(q.text)}"><span class="heatmap-q-head">${esc(q.text)}</span></th>`).join("")}
+          </tr></thead>
+          <tbody>
+            ${rows.map(({ persona, run, values }) => `
+              <tr>
+                <td class="heatmap-persona-cell">${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}${run?.status === "FAILED" ? ` <span class="badge bad">Falhou</span>` : ""}</td>
+                ${heatmapQuestions.map((q, i) => {
+                  const val = values[i];
+                  if (val == null || typeof val !== "number") {
+                    return `<td class="heatmap-cell empty">—</td>`;
+                  }
+                  const min = q.min ?? 0, max = q.max ?? 100;
+                  const norm = max > min ? Math.max(0, Math.min(1, (val - min) / (max - min))) : 0;
+                  const alpha = (0.08 + norm * 0.72).toFixed(2);
+                  return `<td class="heatmap-cell" style="background:rgba(79,142,247,${alpha})"
+                    data-heatmap-cell
+                    data-persona="${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}"
+                    data-question="${esc(q.text)}"
+                    data-value="${val}"
+                    data-max="${max}">${esc(String(val))}</td>`;
+                }).join("")}
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+      <div class="heatmap-detail" id="heatmap-detail" hidden></div>`;
+  };
 
   const renderTabContent = () => {
     if (activeTab === "resumo") {
@@ -1359,6 +1445,7 @@ function renderPopulationRunHub(main, popRun) {
         </div>
         <p class="faint small" style="margin-top:14px">Estatísticas agregadas (divergência entre leitores, heatmap de reações, respostas por pergunta) chegam em uma próxima etapa.</p>`;
     }
+    if (activeTab === "heatmap") return renderHeatmapTab();
     if (activeTab === "leitores") {
       return `
         <div class="pr-status-list">
@@ -1431,6 +1518,26 @@ function renderPopulationRunHub(main, popRun) {
         catch { toast("Não foi possível copiar", "bad"); }
       });
       main.querySelector("#pr-download-json")?.addEventListener("click", () => download(`readerlab-population-run-${popRun.id}.json`, bundle()));
+    }
+
+    if (activeTab === "heatmap") {
+      main.querySelector("#heatmap-sort-by")?.addEventListener("change", (e) => {
+        heatmapSort.by = e.target.value;
+        renderAll();
+      });
+      main.querySelector("#heatmap-sort-dir")?.addEventListener("click", () => {
+        heatmapSort.dir = heatmapSort.dir === "asc" ? "desc" : "asc";
+        renderAll();
+      });
+      $$("[data-heatmap-cell]", main).forEach((cell) => cell.addEventListener("click", () => {
+        const box = main.querySelector("#heatmap-detail");
+        if (!box) return;
+        box.hidden = false;
+        box.innerHTML = `
+          <div class="heatmap-detail-persona">${esc(cell.dataset.persona)}</div>
+          <div class="heatmap-detail-question">${esc(cell.dataset.question)}</div>
+          <div class="heatmap-detail-value">${esc(cell.dataset.value)} / ${esc(cell.dataset.max)}</div>`;
+      }));
     }
   };
 

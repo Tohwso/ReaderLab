@@ -290,6 +290,29 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .tab-btn:hover { color: var(--text); }
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 .tab-panel { min-height: 120px; }
+
+/* ============ Heatmap de respostas quantitativas ============ */
+.heatmap-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.heatmap-toolbar select { width: auto; max-width: 260px; }
+.heatmap-table-wrap { max-width: 100%; }
+.heatmap-table { font-size: 12.5px; }
+.heatmap-table th, .heatmap-table td { padding: 8px 12px; white-space: nowrap; }
+.heatmap-table th:first-child, .heatmap-table td:first-child {
+  position: sticky; left: 0; z-index: 1; background: var(--bg-2);
+  border-right: 1px solid var(--line-soft); text-align: left;
+}
+.heatmap-q-head { display: inline-block; max-width: 130px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.heatmap-persona-cell { font-family: var(--mono); font-size: 12px; }
+.heatmap-cell { text-align: center; font-family: var(--mono); cursor: pointer; color: var(--text); }
+.heatmap-cell.empty { color: var(--faint); cursor: default; }
+.heatmap-cell:hover:not(.empty) { outline: 1px solid var(--accent); outline-offset: -1px; }
+.heatmap-detail {
+  margin-top: 12px; padding: 10px 14px; background: var(--bg-3); border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm); font-size: 13px;
+}
+.heatmap-detail-persona { font-weight: 650; margin-bottom: 2px; }
+.heatmap-detail-question { color: var(--muted); margin-bottom: 4px; }
+.heatmap-detail-value { font-family: var(--mono); color: var(--accent); font-weight: 650; }
 .checkbox-row input { width: auto; }
 .pop-members { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
