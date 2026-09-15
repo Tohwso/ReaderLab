@@ -11,6 +11,7 @@ import { buildReadingPrompt } from "./llm/promptBuilder.js";
 import { validateLLMResponse } from "./llm/validate.js";
 import { DemoProvider } from "./llm/demoProvider.js";
 import { runWithRetry } from "./llm/retry.js";
+import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
 import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
 
 // Executa uma ReadingRun até seu status final (COMPLETED|FAILED) — ou a
@@ -71,6 +72,12 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     const provider = isDemo
       ? new DemoProvider({ persona, attributes: attributeCatalog, reactions: activeReactions, survey })
       : getProvider(liveCfg);
+    // Provider demo/local nunca bate em API nenhuma — só chamadas REAIS
+    // passam pelo coordenador central de rate limit (nunca duplicar isto
+    // por ReadingRun: é o mesmo coordenador para toda a aba, ver
+    // llm/rateLimitManager.js).
+    const callProvider = () => provider.complete({ systemPrompt: system, userPrompt: user });
+    const guardedCall = isDemo ? callProvider : () => kimiRateLimitManager.run(callProvider, { isCancelled });
 
     // Retry automático só para falhas TRANSITÓRIAS do provider (rate limit,
     // sobrecarga, rede, timeout, erro de servidor — ver llm/errorTypes.js).
@@ -80,7 +87,7 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     // verdade) — nunca vira FAILED só por causa de um 429/503 isolado
     // (critério de aceite desta funcionalidade).
     const { content, model } = await runWithRetry(
-      () => provider.complete({ systemPrompt: system, userPrompt: user }),
+      guardedCall,
       {
         startAttempt: (run.attemptCount || 0) + 1,
         initialWaitUntil: isResume && run.nextRetryAt ? new Date(run.nextRetryAt).getTime() : null,

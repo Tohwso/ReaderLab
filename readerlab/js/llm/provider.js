@@ -56,8 +56,13 @@ export class ProviderError extends Error {
 }
 
 // Mensagens amigáveis (sem stack trace, sem secrets) para o frontend.
+// `errorType` presente identifica tanto ProviderError quanto os erros
+// sintéticos do coordenador central de rate limit (ver
+// llm/rateLimitManager.js) — ambos já trazem mensagem pronta para exibir.
 export function providerErrorMessage(err) {
   if (err instanceof ProviderError) return err.message;
+  if (err?.cancelled) return err.message || "Execução interrompida (cancelada).";
+  if (err && typeof err.errorType === "string" && typeof err.message === "string") return err.message;
   if (err && err.name === "AbortError") return "A chamada foi interrompida (timeout).";
   return "Erro inesperado durante a execução. Tente novamente.";
 }

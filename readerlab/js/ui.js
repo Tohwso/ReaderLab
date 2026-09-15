@@ -5,6 +5,7 @@ import { persistenceMode, signOut } from "./db.js";
 import { getLLMConfig } from "./llm/provider.js";
 import { renderRunResultView } from "./components/runResultView.js";
 import { executeReadingRun, executePopulationRun, resumePopulationRun, cancelPopulationRun, isPopulationRunActive } from "./engine.js";
+import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
 import { SEGMENT_RULE_OPS, filterPersonasBySegment, computeQuestionStats, computeReactionAggregates, collectQuestionAnswers, computeBooleanStats, computeChoiceStats } from "./analytics/populationMetrics.js";
 import { runPopulationAnalysis } from "./analysisEngine.js";
 
@@ -1222,6 +1223,19 @@ function populationRunStatusBadge(status) {
   return `<span class="badge ${cls}">${esc(D.POPULATION_RUN_STATUS[status] || status)}</span>`;
 }
 
+// Banner informativo (NUNCA um erro da população, ver rateLimitManager.js)
+// mostrado quando o coordenador central de rate limit está segurando
+// novas chamadas ao provider (circuito aberto ou cooldown global) —
+// atualizado pelo mesmo polling de 900ms que já redesenha esta tela.
+function rateLimitBanner() {
+  const state = kimiRateLimitManager.getState();
+  if (!state.limited) return "";
+  const untilMs = state.circuitOpenUntil || state.globalCooldownUntil;
+  const secs = untilMs ? Math.max(0, Math.round((untilMs - Date.now()) / 1000)) : null;
+  const label = state.circuitOpenUntil ? "Provider temporariamente limitado" : "Cooldown da API — aguardando para continuar";
+  return `<div class="info-box warn" style="margin-bottom:14px"><span>⏳</span><span>${esc(label)}${secs != null ? ` (~${secs}s)` : ""} — isto não é uma falha desta população, as próximas leituras retomam sozinhas.</span></div>`;
+}
+
 function viewPopulationRunDetail(main, popRunId, query = {}) {
   let resumeAttempted = false;
   let hubMounted = false;
@@ -1244,6 +1258,7 @@ function viewPopulationRunDetail(main, popRunId, query = {}) {
       )}
       ${popRun.legacyAttributeFallback ? `
       <div class="info-box warn" style="margin-bottom:14px"><span>⚠</span><span>Execução criada antes do congelamento de AttributeDefinitions (snapshot legado) — os atributos usados aqui foram lidos do catálogo atual no momento da retomada, e podem não corresponder exatamente ao catálogo original.</span></div>` : ""}
+      ${popRun.status === "RUNNING" ? rateLimitBanner() : ""}
       <div class="card" style="margin-bottom:18px">
         <div class="q-meta" style="margin-bottom:10px">${populationRunStatusBadge(popRun.status)}</div>
         <p class="mono">${completed + failed} / ${total} leituras concluídas${failed ? ` · ${failed} falharam` : ""}</p>

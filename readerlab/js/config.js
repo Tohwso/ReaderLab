@@ -34,3 +34,15 @@ function numberOverride(windowKey, fallback) {
 export const LLM_MAX_ATTEMPTS = numberOverride("READERLAB_LLM_MAX_ATTEMPTS", 6);
 export const LLM_RETRY_BASE_DELAY_MS = numberOverride("READERLAB_LLM_RETRY_BASE_DELAY_MS", 2000);
 export const LLM_RETRY_MAX_DELAY_MS = numberOverride("READERLAB_LLM_RETRY_MAX_DELAY_MS", 120000);
+
+// Rate Limit Manager central (ver js/llm/rateLimitManager.js) — único
+// coordenador por onde passam TODAS as chamadas reais à LLM, para que N
+// ReadingRuns (de uma ou mais PopulationRuns) nunca ataquem a API de forma
+// independente. Mesmo padrão de override em runtime dos blocos acima.
+// LLM_MAX_CONCURRENCY começa propositalmente conservador (1) — nunca deve
+// ser aumentado automaticamente pelo próprio app, só por configuração
+// explícita do operador.
+export const LLM_MAX_CONCURRENCY = numberOverride("READERLAB_LLM_MAX_CONCURRENCY", 1);
+export const LLM_MIN_REQUEST_INTERVAL_MS = numberOverride("READERLAB_LLM_MIN_REQUEST_INTERVAL_MS", 3000);
+export const LLM_CIRCUIT_BREAKER_THRESHOLD = numberOverride("READERLAB_LLM_CIRCUIT_BREAKER_THRESHOLD", 5);
+export const LLM_CIRCUIT_BREAKER_COOLDOWN_MS = numberOverride("READERLAB_LLM_CIRCUIT_BREAKER_COOLDOWN_MS", 60000);
