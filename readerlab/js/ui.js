@@ -1125,11 +1125,13 @@ function viewData(main) {
 }
 
 // ============================================================== EXECUÇÕES
-const personaLabel = (id) => {
+const personaLabel = (id, snapshotPersona) => {
+  if (snapshotPersona) return `${snapshotPersona.code ? snapshotPersona.code + " — " : ""}${snapshotPersona.name}`;
   const p = S.state.personas.find((x) => x.id === id);
   return p ? `${p.code ? p.code + " — " : ""}${p.name}` : "(persona removida)";
 };
-const surveyLabel = (id) => {
+const surveyLabel = (id, snapshotSurvey) => {
+  if (snapshotSurvey) return snapshotSurvey.name;
   const s = S.state.surveys.find((x) => x.id === id);
   return s ? s.name : "(pesquisa removida)";
 };
@@ -1159,8 +1161,8 @@ function viewRuns(main) {
           <tr>
             <td class="muted small" style="white-space:nowrap">${fmtDate(r.createdAt)}</td>
             <td><b>${esc(r.title || "(sem título)")}</b>${r.errorMessage && r.status === "FAILED" ? `<div class="faint small">${esc(r.errorMessage)}</div>` : ""}</td>
-            <td class="muted">${esc(personaLabel(r.personaId))}</td>
-            <td class="muted">${esc(surveyLabel(r.surveyId))}</td>
+            <td class="muted">${esc(personaLabel(r.personaId, r.executionSnapshot?.persona))}</td>
+            <td class="muted">${esc(surveyLabel(r.surveyId, r.executionSnapshot?.survey))}</td>
             <td class="mono small">${esc(r.model)}</td>
             <td>${runStatusBadge(r.status)}</td>
             <td><div class="row-actions"><a class="btn btn-sm" href="#/execucoes/${r.id}">Ver resultado</a></div></td>
@@ -1316,17 +1318,27 @@ function viewNewRun(main) {
       const { system, user } = buildReadingPrompt({
         persona, attributes: S.state.attributes, reactions: activeReactions, survey, text,
       });
+      // Snapshot criado ANTES de chamar a LLM: congela persona/atributos/survey/reações
+      // usados nesta execução, imunes a edições futuras dessas entidades.
+      run.executionSnapshot = D.buildExecutionSnapshot({
+        persona, attributes: S.state.attributes, survey, reactions: activeReactions,
+        provider: run.provider, model: run.model, promptVersion: run.promptVersion,
+      });
       run.requestMetadata = {
         promptChars: system.length + user.length,
         reactionCount: activeReactions.length,
         questionCount: survey.questions.length,
+        snapshotVersion: 1,
       };
       const provider = isDemo
         ? new DemoProvider({ persona, attributes: S.state.attributes, reactions: activeReactions, survey })
         : getProvider(liveCfg);
       const { content, model } = await provider.complete({ systemPrompt: system, userPrompt: user });
       run.rawResponse = content;
-      if (!isDemo && model) run.model = model;
+      if (!isDemo && model) {
+        run.model = model;
+        run.executionSnapshot.llmConfig.model = model;
+      }
 
       let parsed;
       try {
@@ -1360,14 +1372,19 @@ function viewRunDetail(main, id) {
   const run = S.state.runs.find((r) => r.id === id);
   if (!run) { location.hash = "#/execucoes"; return; }
   const result = S.getResultForRun(run.id);
-  const survey = S.state.surveys.find((s) => s.id === run.surveyId);
-  const persona = S.state.personas.find((p) => p.id === run.personaId);
+  // executionSnapshot (quando existe) é a fonte de verdade — congelada no
+  // momento da execução, imune a edições posteriores de Persona/Survey/
+  // Reações. Runs antigas sem snapshot caem no comportamento legado.
+  const snap = run.executionSnapshot || null;
+  const survey = snap?.survey || S.state.surveys.find((s) => s.id === run.surveyId);
+  const persona = snap?.persona || S.state.personas.find((p) => p.id === run.personaId);
+  const reactionDefs = snap?.reactions || S.state.reactions;
 
   const reactionsHTML = result && result.reactions.length ? `
     <div class="section-title">Reações</div>
     <div style="display:flex;flex-direction:column;gap:10px">
       ${result.reactions.map((rr) => {
-        const def = S.state.reactions.find((r) => r.code === rr.reactionCode);
+        const def = reactionDefs.find((r) => r.code === rr.reactionCode);
         const color = def ? def.color : "#8b98a9";
         const name = def ? def.name : rr.reactionCode;
         const pct = rr.intensity != null ? rr.intensity : null;
@@ -1436,8 +1453,8 @@ function viewRunDetail(main, id) {
     <div class="card" style="margin-bottom:18px">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 18px">
         <div><div class="faint small">STATUS</div>${runStatusBadge(run.status)}</div>
-        <div><div class="faint small">PERSONA</div><b>${esc(personaLabel(run.personaId))}</b></div>
-        <div><div class="faint small">PESQUISA</div><b>${esc(surveyLabel(run.surveyId))}</b></div>
+        <div><div class="faint small">PERSONA</div><b>${esc(personaLabel(run.personaId, snap?.persona))}</b></div>
+        <div><div class="faint small">PESQUISA</div><b>${esc(surveyLabel(run.surveyId, snap?.survey))}</b></div>
         <div><div class="faint small">PROVIDER / MODELO</div><span class="mono">${esc(run.provider)} / ${esc(run.model)}</span></div>
         <div><div class="faint small">PROMPT VERSION</div><span class="mono">${esc(run.promptVersion)}</span></div>
         <div><div class="faint small">DATA</div><span class="mono small">${fmtDate(run.createdAt)}</span></div>
@@ -1453,6 +1470,11 @@ function viewRunDetail(main, id) {
     ${run.status === "COMPLETED" && !result ? `
       <div class="info-box warn" style="margin-bottom:16px"><span>⚠</span>
         <span>Execução concluída, mas o resultado estruturado não foi encontrado (possível perda de dados).</span>
+      </div>` : ""}
+
+    ${!snap && run.status === "COMPLETED" ? `
+      <div class="info-box" style="margin-bottom:16px"><span>ℹ</span>
+        <span>Execução anterior à introdução do snapshot de configuração — Persona/Pesquisa/Reações exibidas abaixo refletem o estado <b>atual</b> dessas entidades, que pode ter mudado desde a execução.</span>
       </div>` : ""}
 
     ${persona && run.status !== "FAILED" ? `
@@ -1474,6 +1496,9 @@ function viewRunDetail(main, id) {
           ? `<pre class="mono small" style="white-space:pre-wrap;margin:12px 0 0">${esc(run.rawResponse)}</pre>`
           : `<p class="muted small" style="margin-top:10px">Nenhuma resposta recebida.</p>`}
       </details>
+      ${snap ? `<details class="card"><summary style="cursor:pointer;font-weight:650">Ver snapshot da execução (persona/atributos/survey/reações congelados)</summary>
+        <pre class="mono small" style="white-space:pre-wrap;margin:12px 0 0">${esc(JSON.stringify(snap, null, 2))}</pre>
+      </details>` : ""}
       <details class="card"><summary style="cursor:pointer;font-weight:650">Texto fornecido</summary>
         <p class="muted small mono" style="white-space:pre-wrap;margin:12px 0 0">${esc(run.inputText)}</p>
       </details>

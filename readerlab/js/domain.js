@@ -579,7 +579,26 @@ export function blankRun() {
     errorMessage: "",
     rawResponse: "",
     requestMetadata: {},
+    executionSnapshot: null, // preenchido por buildExecutionSnapshot() antes de chamar a LLM
   };
+}
+
+// Snapshot imutável da configuração efetivamente usada numa execução —
+// protege runs antigas contra alterações posteriores em Persona/Atributos/
+// Survey/Reações (deep clone via structuredClone; nenhuma referência viva
+// às entidades originais). Runs sem snapshot (criadas antes desta versão)
+// caem no comportamento legado de ler as entidades atuais do store.
+export function buildExecutionSnapshot({ persona, attributes, survey, reactions, provider, model, promptVersion }) {
+  const usedAttributeIds = new Set(Object.keys(persona.attributeValues || {}));
+  const usedAttributes = attributes.filter((a) => usedAttributeIds.has(a.id));
+  return structuredClone({
+    version: 1, // snapshotVersion — incrementar se o shape mudar de forma incompatível
+    persona,
+    attributes: usedAttributes,
+    survey,
+    reactions,
+    llmConfig: { provider, model, promptVersion },
+  });
 }
 
 export function blankResult(readingRunId) {
