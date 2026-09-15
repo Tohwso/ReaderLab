@@ -124,7 +124,10 @@ create table if not exists runs (
   -- Projeção de data->>'nextRetryAt' (ver js/domain.js/blankRun) — permite
   -- localizar ReadingRuns em WAITING_RETRY sem carregar a tabela inteira;
   -- `data` continua sendo a única fonte de verdade, isto é só um índice.
-  next_retry_at timestamptz generated always as ((data->>'nextRetryAt')::timestamptz) stored,
+  -- `text` (não timestamptz): cast text->timestamptz não é IMMUTABLE no
+  -- Postgres, então não pode ser usado numa coluna gerada; strings ISO
+  -- 8601 ordenam corretamente como texto.
+  next_retry_at text generated always as (data->>'nextRetryAt') stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

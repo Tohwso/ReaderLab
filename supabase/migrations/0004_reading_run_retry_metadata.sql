@@ -16,8 +16,14 @@
 -- arquivo inteiro e clique em Run) — ou via `npx supabase@latest db push`.
 --
 -- Pré-requisito: já ter aplicado 0002_population_runs.sql.
+--
+-- Guardada como `text` (não `timestamptz`): o cast text->timestamptz não é
+-- IMMUTABLE no Postgres (depende do timezone da sessão), então não pode
+-- ser usado numa coluna gerada. As strings são ISO 8601 (ex.: produzidas
+-- por new Date().toISOString()), que ordenam corretamente como texto —
+-- suficiente para o índice/consulta abaixo.
 
 alter table runs
-  add column if not exists next_retry_at timestamptz generated always as ((data->>'nextRetryAt')::timestamptz) stored;
+  add column if not exists next_retry_at text generated always as (data->>'nextRetryAt') stored;
 
 create index if not exists runs_next_retry_at_idx on runs (next_retry_at) where status = 'WAITING_RETRY';
