@@ -313,6 +313,12 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .heatmap-detail-persona { font-weight: 650; margin-bottom: 2px; }
 .heatmap-detail-question { color: var(--muted); margin-bottom: 4px; }
 .heatmap-detail-value { font-family: var(--mono); color: var(--accent); font-weight: 650; }
+
+/* ============ Estatísticas por pergunta (Heatmap) ============ */
+.qstat-card { display: flex; flex-direction: column; gap: 3px; }
+.qstat-title { font-weight: 650; font-size: 13px; margin-bottom: 4px; }
+.qstat-row { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--muted); }
+.qstat-row b { color: var(--text); }
 .checkbox-row input { width: auto; }
 .pop-members { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 

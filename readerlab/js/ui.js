@@ -5,6 +5,7 @@ import { persistenceMode, signOut } from "./db.js";
 import { getLLMConfig } from "./llm/provider.js";
 import { renderRunResultView } from "./components/runResultView.js";
 import { executeReadingRun, executePopulationRun, resumePopulationRun, cancelPopulationRun, isPopulationRunActive } from "./engine.js";
+import { describeQuestionValues } from "./analytics/statistics.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -1349,6 +1350,7 @@ function renderPopulationRunHub(main, popRun) {
 
   let activeTab = "resumo";
   let heatmapSort = { by: "code", dir: "asc" };
+  let questionStatsSort = "mean_desc";
   let reactionsSort = { by: "freq", dir: "desc" };
   let reactionsShowZero = false;
   let openReactionCodes = new Set();
@@ -1356,6 +1358,64 @@ function renderPopulationRunHub(main, popRun) {
   // Colunas dinâmicas: perguntas quantitativas (scale/number) da Survey
   // congelada no snapshot — nunca por nome fixo.
   const heatmapQuestions = (snapshotSurvey?.questions || []).filter((q) => HEATMAP_QUESTION_TYPES.has(q.type));
+
+  // Estatísticas por pergunta (N, média, mediana, faixa, desvio populacional
+  // e Índice de Divergência) — só sobre respostas válidas dos leitores que
+  // concluíram a leitura; ausência de resposta nunca vira zero.
+  const questionStats = () => heatmapQuestions.map((q) => {
+    const values = runs
+      .filter((r) => r.status === "COMPLETED")
+      .map((r) => S.getResultForRun(r.id)?.surveyAnswers.find((a) => a.questionId === q.id)?.value);
+    return { question: q, stats: describeQuestionValues(values, { min: q.min ?? 0, max: q.max ?? 100 }) };
+  });
+
+  const sortedQuestionStats = () => {
+    const list = questionStats();
+    const [key, dir] = questionStatsSort.split("_");
+    const mul = dir === "desc" ? -1 : 1;
+    list.sort((a, b) => {
+      const av = key === "mean" ? a.stats.mean : a.stats.divergence;
+      const bv = key === "mean" ? b.stats.mean : b.stats.divergence;
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1; // sem estatística (N=0) sempre por último
+      if (bv == null) return -1;
+      return (av - bv) * mul;
+    });
+    return list;
+  };
+
+  const renderQuestionStatsCards = () => {
+    const list = sortedQuestionStats();
+    return `
+      <div class="heatmap-toolbar">
+        <label class="hint" for="qstats-sort">Ordenar por</label>
+        <select id="qstats-sort">
+          <option value="mean_desc" ${questionStatsSort === "mean_desc" ? "selected" : ""}>Maior média</option>
+          <option value="mean_asc" ${questionStatsSort === "mean_asc" ? "selected" : ""}>Menor média</option>
+          <option value="divergence_desc" ${questionStatsSort === "divergence_desc" ? "selected" : ""}>Maior divergência</option>
+          <option value="divergence_asc" ${questionStatsSort === "divergence_asc" ? "selected" : ""}>Menor divergência</option>
+        </select>
+        <span class="hint" title="Índice comparativo interno baseado na dispersão das respostas.">ⓘ o que é divergência?</span>
+      </div>
+      <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:18px">
+        ${list.map(({ question, stats }) => `
+          <div class="card qstat-card">
+            <div class="qstat-title">${esc(question.text)}</div>
+            ${stats.n === 0
+              ? `<p class="faint small">Sem respostas válidas.</p>`
+              : `
+                <div class="qstat-row"><span>Média</span><b class="mono">${Math.round(stats.mean)}</b></div>
+                <div class="qstat-row"><span>Mediana</span><b class="mono">${Math.round(stats.median)}</b></div>
+                <div class="qstat-row"><span>Faixa</span><b class="mono">${stats.min}–${stats.max}</b></div>
+                <div class="qstat-row"><span>Desvio (populacional)</span><b class="mono">${Math.round(stats.standardDeviation)}</b></div>
+                ${stats.divergence != null
+                  ? `<div class="qstat-row"><span>Divergência</span><b class="mono">${Math.round(stats.divergence * 100)}%</b></div>
+                     <span class="badge ${stats.classification.cls}" title="Índice comparativo interno baseado na dispersão das respostas.">${stats.classification.label}</span>`
+                  : `<p class="faint small">Escala sem amplitude — divergência não calculada.</p>`}
+                <p class="hint" style="margin-top:6px">N = ${stats.n}</p>`}
+          </div>`).join("")}
+      </div>`;
+  };
 
   const heatmapRows = () => snapshotPersonas.map((persona) => {
     const run = runByPersona.get(persona.id);
@@ -1392,6 +1452,8 @@ function renderPopulationRunHub(main, popRun) {
     }
     const rows = sortedHeatmapRows();
     return `
+      ${renderQuestionStatsCards()}
+      <div class="section-title">Matriz por leitor</div>
       <div class="heatmap-toolbar">
         <label class="hint" for="heatmap-sort-by">Ordenar por</label>
         <select id="heatmap-sort-by">
@@ -1637,6 +1699,10 @@ function renderPopulationRunHub(main, popRun) {
     }
 
     if (activeTab === "heatmap") {
+      main.querySelector("#qstats-sort")?.addEventListener("change", (e) => {
+        questionStatsSort = e.target.value;
+        renderAll();
+      });
       main.querySelector("#heatmap-sort-by")?.addEventListener("change", (e) => {
         heatmapSort.by = e.target.value;
         renderAll();
