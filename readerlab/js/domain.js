@@ -321,22 +321,48 @@ export function blankPopulationRun() {
     completedAt: null,
     errorMessage: "",
     executionSnapshot: null, // preenchido por buildPopulationExecutionSnapshot() antes de disparar as ReadingRuns
+    legacyAttributeFallback: false, // true quando a retomada precisou cair para o catálogo atual de atributos (snapshot antigo sem attributeDefinitions)
   };
 }
 
-// Snapshot imutável da composição efetiva da PopulationRun — protege o
-// histórico contra alterações futuras da Population (membros podem mudar,
-// personas podem ser editadas/arquivadas) e de Survey/Reações.
-export function buildPopulationExecutionSnapshot({ population, personas, survey, reactions, provider, model, promptVersion }) {
+// Snapshot imutável e AUTOSSUFICIENTE da composição efetiva da PopulationRun
+// — congela, no momento da criação, tudo que o Prompt Builder precisa para
+// rodar cada ReadingRun filha, protegendo o histórico contra alterações
+// futuras da Population (membros podem mudar), das Personas (podem ser
+// editadas/arquivadas), da Survey e das ReactionDefinitions. NENHUMA
+// ReadingRun disparada por uma PopulationRun deve ler S.state.* para montar
+// sua execução — apenas este snapshot (ver engine.js/runPopulationLoop).
+// snapshotVersion 2 adiciona `attributeDefinitions` (ausente na v1) — ver
+// resolvePopulationSnapshotAttributes() para o fallback de compatibilidade.
+export function buildPopulationExecutionSnapshot({ population, personas, survey, reactions, attributes, provider, model, promptVersion }) {
+  const usedAttributeIds = new Set();
+  for (const p of personas) for (const id of Object.keys(p.attributeValues || {})) usedAttributeIds.add(id);
+  const attributeDefinitions = (attributes || []).filter((a) => usedAttributeIds.has(a.id));
   return structuredClone({
-    version: 1,
+    snapshotVersion: 2,
     population,
     personas,
+    attributeDefinitions,
     survey,
     reactions,
     llmConfig: { provider, model, promptVersion },
   });
 }
+
+// PopulationRuns criadas antes da snapshotVersion 2 não têm
+// `attributeDefinitions` no snapshot — não há como inventar essa informação
+// retroativamente (os valores por atributo já estão em `persona.attributeValues`,
+// mas o catálogo de definições em si não foi congelado). Para essas, e
+// somente essas, é permitido cair para o catálogo atual de atributos;
+// PopulationRuns novas (snapshotVersion >= 2) NUNCA usam este fallback.
+export function resolvePopulationSnapshotAttributes(popRun, liveAttributes) {
+  const snap = popRun.executionSnapshot || {};
+  if ((snap.snapshotVersion || 1) >= 2 && Array.isArray(snap.attributeDefinitions)) {
+    return { attributes: snap.attributeDefinitions, legacyFallback: false };
+  }
+  return { attributes: liveAttributes, legacyFallback: true };
+}
+
 
 // ------------------------------------------------------- AnalysisRun (Research Analyst)
 // Uma AnalysisRun representa UMA interpretação, por IA, dos resultados JÁ

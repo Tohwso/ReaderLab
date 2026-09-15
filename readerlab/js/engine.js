@@ -16,21 +16,30 @@ import { DemoProvider } from "./llm/demoProvider.js";
 // provider/validação viram run.status = "FAILED" + run.errorMessage — quem
 // chama decide o que fazer a seguir (ex.: continuar as próximas personas de
 // uma PopulationRun mesmo que esta tenha falhado).
-export async function executeReadingRun(run, { persona, survey, mode, liveCfg }) {
+//
+// `attributes`/`reactions` são OPCIONAIS: quando fornecidos (execução
+// disparada por uma PopulationRun), esta ReadingRun NUNCA consulta
+// S.state.attributes/S.state.reactions — usa exclusivamente o que o
+// chamador já congelou (ver runPopulationLoop, abaixo). Só cai para o
+// catálogo/reações ATUAIS quando ausentes, o que só acontece na execução
+// avulsa de uma única ReadingRun (ui.js/viewNewRun), que sempre deve
+// refletir o cadastro vigente.
+export async function executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg }) {
   run.status = "RUNNING";
   run.startedAt = D.nowISO();
   await S.saveRun(run);
 
   const isDemo = mode === "demo";
+  const attributeCatalog = attributes || S.state.attributes;
+  const activeReactions = reactions || S.state.reactions.filter((r) => r.status === "ativa");
   try {
-    const activeReactions = S.state.reactions.filter((r) => r.status === "ativa");
     const { system, user } = buildReadingPrompt({
-      persona, attributes: S.state.attributes, reactions: activeReactions, survey, text: run.inputText,
+      persona, attributes: attributeCatalog, reactions: activeReactions, survey, text: run.inputText,
     });
     // Snapshot criado ANTES de chamar a LLM: congela persona/atributos/survey/reações
     // usados nesta execução, imunes a edições futuras dessas entidades.
     run.executionSnapshot = D.buildExecutionSnapshot({
-      persona, attributes: S.state.attributes, survey, reactions: activeReactions,
+      persona, attributes: attributeCatalog, survey, reactions: activeReactions,
       provider: run.provider, model: run.model, promptVersion: run.promptVersion,
     });
     run.requestMetadata = {
@@ -40,7 +49,7 @@ export async function executeReadingRun(run, { persona, survey, mode, liveCfg })
       snapshotVersion: 1,
     };
     const provider = isDemo
-      ? new DemoProvider({ persona, attributes: S.state.attributes, reactions: activeReactions, survey })
+      ? new DemoProvider({ persona, attributes: attributeCatalog, reactions: activeReactions, survey })
       : getProvider(liveCfg);
     const { content, model } = await provider.complete({ systemPrompt: system, userPrompt: user });
     run.rawResponse = content;
@@ -74,6 +83,7 @@ export async function executeReadingRun(run, { persona, survey, mode, liveCfg })
   }
 }
 
+
 // IDs de PopulationRun com um loop ativo NESTA aba — evita disparar duas
 // vezes a mesma orquestração (ex.: a tela de acompanhamento tentando
 // "retomar" uma execução que a própria submissão do formulário já está
@@ -87,9 +97,30 @@ const inFlight = new Set();
 // uma PopulationRun interrompida (ex.: recarregamento de página) sem
 // duplicar leituras já concluídas. Reconsulta o status ao vivo a cada
 // iteração para respeitar um cancelamento pedido no meio da execução.
-async function runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress }) {
-  const snapshotPersonas = popRun.executionSnapshot.personas;
+//
+// Reprodutibilidade histórica: survey/reações/atributos usados por TODAS
+// as ReadingRuns filhas vêm exclusivamente de popRun.executionSnapshot —
+// nunca de S.state.surveys/reactions/attributes. Isso vale tanto no
+// disparo inicial quanto numa retomada (após recarregar a página), mesmo
+// que a Survey/ReactionDefinitions/AttributeDefinitions originais tenham
+// sido editadas, desativadas ou excluídas nesse meio-tempo. A única
+// exceção é PopulationRuns antigas (snapshotVersion < 2), que não têm
+// attributeDefinitions congeladas — ver resolvePopulationSnapshotAttributes().
+async function runPopulationLoop(popRun, { mode, liveCfg, onProgress }) {
+  const snapshot = popRun.executionSnapshot;
+  const snapshotPersonas = snapshot.personas;
+  const survey = snapshot.survey;
+  const reactions = snapshot.reactions;
   const total = snapshotPersonas.length;
+
+  const { attributes, legacyFallback } = D.resolvePopulationSnapshotAttributes(popRun, S.state.attributes);
+  if (legacyFallback && !popRun.legacyAttributeFallback) {
+    // Metadata explícita: esta PopulationRun é anterior à snapshotVersion 2
+    // e precisou cair para o catálogo atual de atributos — nunca inventamos
+    // um snapshot que não existia.
+    popRun.legacyAttributeFallback = true;
+    await S.savePopulationRun(popRun);
+  }
 
   for (const persona of snapshotPersonas) {
     const live = S.state.populationRuns.find((p) => p.id === popRun.id) || popRun;
@@ -113,8 +144,18 @@ async function runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress }) 
       await S.saveRun(run);
     }
     onProgress?.({ phase: "start", persona, run, total });
-    const { ok } = await executeReadingRun(run, { persona, survey, mode, liveCfg });
+    const { ok } = await executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg });
     onProgress?.({ phase: "done", persona, run, ok, total });
+
+    // O modelo efetivamente usado só é conhecido após a 1ª resposta real do
+    // provider (ver executeReadingRun) — propaga para a PopulationRun assim
+    // que descoberto, para nunca deixar popRun.model vazio numa execução
+    // real (modo demo já vem preenchido desde a criação).
+    if (!popRun.model && run.model) {
+      popRun.model = run.model;
+      if (popRun.executionSnapshot?.llmConfig) popRun.executionSnapshot.llmConfig.model = run.model;
+      await S.savePopulationRun(popRun);
+    }
   }
 
   const latest = S.state.populationRuns.find((p) => p.id === popRun.id) || popRun;
@@ -131,13 +172,17 @@ async function runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress }) 
 }
 
 // Orquestra uma PopulationRun nova: cria o snapshot congelado (Population +
-// Personas + Survey + Reações + config no momento do disparo) e então
-// executa, SEQUENCIALMENTE (uma de cada vez, sem paralelismo nesta
-// primeira versão), uma ReadingRun independente por Persona — mesmo
-// texto, mesma Survey, mesma config de modelo. Personas não compartilham
-// resposta/memória/contexto entre si. Falha de uma Persona não cancela as
-// demais (falha parcial vira PARTIAL). Nunca reimplementa o motor de
-// ReadingRun — cada leitura passa por executeReadingRun().
+// Personas + AttributeDefinitions + Survey + Reações + config no momento
+// do disparo) e então executa, SEQUENCIALMENTE (uma de cada vez, sem
+// paralelismo nesta primeira versão), uma ReadingRun independente por
+// Persona — mesmo texto, mesma Survey, mesma config de modelo. Personas
+// não compartilham resposta/memória/contexto entre si. Falha de uma
+// Persona não cancela as demais (falha parcial vira PARTIAL). Nunca
+// reimplementa o motor de ReadingRun — cada leitura passa por
+// executeReadingRun(). Este é o ÚNICO ponto em que a orquestração ainda lê
+// S.state.* diretamente — é exatamente o instante em que a configuração é
+// congelada; depois disso, runPopulationLoop() nunca mais toca em S.state
+// para montar uma execução (só para checar cancelamento/progresso).
 export async function executePopulationRun(popRun, { population, personas, survey, mode, liveCfg, onProgress }) {
   if (inFlight.has(popRun.id)) return popRun;
   inFlight.add(popRun.id);
@@ -146,11 +191,11 @@ export async function executePopulationRun(popRun, { population, personas, surve
     popRun.startedAt = D.nowISO();
     const activeReactions = S.state.reactions.filter((r) => r.status === "ativa");
     popRun.executionSnapshot = D.buildPopulationExecutionSnapshot({
-      population, personas, survey, reactions: activeReactions,
+      population, personas, survey, reactions: activeReactions, attributes: S.state.attributes,
       provider: popRun.provider, model: popRun.model, promptVersion: popRun.promptVersion,
     });
     await S.savePopulationRun(popRun);
-    return await runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress });
+    return await runPopulationLoop(popRun, { mode, liveCfg, onProgress });
   } finally {
     inFlight.delete(popRun.id);
   }
@@ -159,18 +204,19 @@ export async function executePopulationRun(popRun, { population, personas, surve
 // Retoma uma PopulationRun que ficou presa em RUNNING nesta conta (ex.: a
 // aba foi recarregada no meio da execução) — reaproveita o snapshot já
 // gravado e continua apenas as Personas ainda sem ReadingRun terminada.
-// Não faz nada se já houver um loop ativo para este id nesta aba, ou se a
-// PopulationRun não estiver mais em RUNNING.
+// NUNCA busca novamente Survey/ReactionDefinitions/AttributeDefinitions
+// atuais — runPopulationLoop() já resolve tudo a partir do snapshot
+// congelado. Não faz nada se já houver um loop ativo para este id nesta
+// aba, ou se a PopulationRun não estiver mais em RUNNING.
 export async function resumePopulationRun(popRunId, { onProgress } = {}) {
   if (inFlight.has(popRunId)) return null;
   const popRun = S.state.populationRuns.find((p) => p.id === popRunId);
   if (!popRun || popRun.status !== "RUNNING" || !popRun.executionSnapshot) return null;
   inFlight.add(popRunId);
   try {
-    const survey = S.state.surveys.find((s) => s.id === popRun.surveyId) || popRun.executionSnapshot.survey;
     const mode = popRun.provider === "demo-local" ? "demo" : "llm";
     const liveCfg = mode === "llm" ? getLLMConfig() : null;
-    return await runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress });
+    return await runPopulationLoop(popRun, { mode, liveCfg, onProgress });
   } finally {
     inFlight.delete(popRunId);
   }

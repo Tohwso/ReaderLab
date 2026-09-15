@@ -1240,6 +1240,8 @@ function viewPopulationRunDetail(main, popRunId, query = {}) {
         `Population: <b>${esc(population?.name || "—")}</b>`,
         `<button class="btn btn-danger" id="pr-cancel">Cancelar execução</button><a class="btn" href="#/populacoes">Voltar às populações</a>`
       )}
+      ${popRun.legacyAttributeFallback ? `
+      <div class="info-box warn" style="margin-bottom:14px"><span>⚠</span><span>Execução criada antes do congelamento de AttributeDefinitions (snapshot legado) — os atributos usados aqui foram lidos do catálogo atual no momento da retomada, e podem não corresponder exatamente ao catálogo original.</span></div>` : ""}
       <div class="card" style="margin-bottom:18px">
         <div class="q-meta" style="margin-bottom:10px">${populationRunStatusBadge(popRun.status)}</div>
         <p class="mono">${completed + failed} / ${total} leituras concluídas${failed ? ` · ${failed} falharam` : ""}</p>
@@ -1997,6 +1999,8 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
         `${esc(population?.name || "—")} · ${total} leitor(es)${survey ? " · " + esc(survey.name) : ""}`,
         `<a class="btn" href="#/populacoes">Voltar às populações</a>`
       )}
+      ${popRun.legacyAttributeFallback ? `
+      <div class="info-box warn" style="margin-bottom:14px"><span>⚠</span><span>Execução anterior ao congelamento de AttributeDefinitions (snapshot legado) — atributos exibidos aqui vêm do catálogo atual, não de um snapshot original.</span></div>` : ""}
       <div class="card" style="margin-bottom:18px">
         <div class="q-meta" style="margin-bottom:6px">
           ${populationRunStatusBadge(popRun.status)}
