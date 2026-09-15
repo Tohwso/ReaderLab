@@ -22,7 +22,8 @@ readerlab/          frontend estático — publique este diretório
       validate.js
       demoProvider.js
 supabase/            backend — ver supabase/README.md
-  schema.sql         tabelas + RLS
+  schema.sql         tabelas + RLS (instalação nova)
+  migrations/        migrations incrementais (ex.: 0001_owner_id_and_auth.sql)
   functions/
     llm-proxy/       Edge Function: segura a API key da LLM no servidor
 ```
@@ -30,7 +31,8 @@ supabase/            backend — ver supabase/README.md
 ## Setup rápido
 
 1. Configure o backend: siga [`supabase/README.md`](./supabase/README.md)
-   (criar projeto, aplicar `schema.sql`, deploy da Edge Function `llm-proxy`).
+   (criar projeto, aplicar `schema.sql`, criar seu usuário, deploy da Edge
+   Function `llm-proxy`).
 2. Preencha `readerlab/js/config.js` com a URL/anon key do projeto e a URL
    da função.
 3. Sirva `readerlab/` com qualquer servidor estático.
@@ -45,7 +47,12 @@ backend (schema SQL e Edge Function), não faz parte do site estático.
 
 ## Autenticação
 
-Não há tela de login: cada visitante recebe uma sessão anônima do Supabase
-(`signInAnonymously`), usada tanto para acessar o Postgres (via RLS) quanto
-para chamar o proxy de LLM. Todos os visitantes compartilham o mesmo
-workspace de dados.
+ReaderLab é uma aplicação privada e autenticada: não há cadastro público.
+Contas são criadas manualmente no Supabase Dashboard (Authentication →
+Users) e o login é feito por e-mail + senha na tela inicial do app. Sem
+uma sessão válida, nenhuma tela do ReaderLab é acessível — apenas o login.
+Cada conta só enxerga os próprios dados (personas, execuções, resultados
+etc.), garantido por Row Level Security no Postgres. Veja
+[`supabase/README.md`](./supabase/README.md) para criar seu usuário e,
+se estiver migrando um projeto já em uso, aplicar a migration não
+destrutiva em `supabase/migrations/`.

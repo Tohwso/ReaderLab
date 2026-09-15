@@ -55,6 +55,14 @@ p { margin: 0; }
 }
 @keyframes pulse { from { opacity: .55; transform: scale(.96);} to { opacity: 1; transform: scale(1);} }
 
+/* ============ Login ============ */
+.login-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.login-card {
+  width: 100%; max-width: 360px; background: var(--bg-2);
+  border: 1px solid var(--line-soft); border-radius: var(--radius);
+  padding: 28px 26px; box-shadow: var(--shadow);
+}
+
 /* ============ Shell ============ */
 .shell { display: grid; grid-template-columns: 232px 1fr; min-height: 100vh; }
 .sidebar {
@@ -153,7 +161,7 @@ p { margin: 0; }
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
 .field > label { font-weight: 600; font-size: 12.5px; color: var(--muted); }
 .field .req { color: var(--bad); }
-input[type="text"], input[type="number"], input[type="color"], select, textarea {
+input[type="text"], input[type="number"], input[type="color"], input[type="email"], input[type="password"], select, textarea {
   background: var(--bg); border: 1px solid var(--line); color: var(--text);
   border-radius: var(--radius-sm); padding: 8px 11px; font: inherit; width: 100%;
 }

@@ -1,11 +1,23 @@
 -- ============ ReaderLab — Schema Supabase (Postgres) ============
 -- Este schema é o backend real por trás de js/db.js. Uma tabela por
 -- "store" do frontend, cada uma guardando o objeto de domínio inteiro em
--- `data` (jsonb) — mesma forma que já existia em IndexedDB/localStorage.
+-- `data` (jsonb) — mesma forma que já existia em IndexedDB/localStorage —
+-- mais uma coluna `owner_id` (dono da linha = auth.uid() de quem gravou).
 -- Colunas geradas (STORED) expõem campos-chave para indexação/consulta,
--- sem impor FKs rígidas: o app original permite referências "soltas" (ex.:
--- apagar uma persona não apaga suas execuções antigas), então preservamos
--- esse comportamento aqui.
+-- sem impor FKs rígidas entre stores: o app original permite referências
+-- "soltas" (ex.: apagar uma persona não apaga suas execuções antigas),
+-- então preservamos esse comportamento aqui.
+--
+-- IMPORTANTE — este arquivo é para PROJETOS NOVOS (banco vazio). Se você
+-- já tem um ReaderLab rodando com o schema antigo (workspace anônimo
+-- compartilhado, sem owner_id), NÃO rode este arquivo: use a migration em
+-- supabase/migrations/0001_owner_id_and_auth.sql, que converte o banco
+-- existente sem apagar dados.
+--
+-- Autenticação: e-mail + senha, sem cadastro público — contas são criadas
+-- manualmente em Authentication → Users no Dashboard (ver
+-- supabase/README.md). Não há mais sessão anônima nem workspace
+-- compartilhado: RLS restringe cada tabela ao próprio owner_id.
 --
 -- Como aplicar: Supabase Dashboard → SQL Editor → cole este arquivo → Run.
 -- (ou `supabase db push` / `psql` apontando para o projeto).
@@ -24,6 +36,7 @@ $$;
 -- --------------------------------------------------------------- personas
 create table if not exists personas (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   code text generated always as (data->>'code') stored,
   name text generated always as (data->>'name') stored,
@@ -31,12 +44,14 @@ create table if not exists personas (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists personas_owner_idx on personas (owner_id);
 create index if not exists personas_status_idx on personas (status);
 create index if not exists personas_code_idx on personas (code);
 
 -- -------------------------------------------------------------- attributes
 create table if not exists attributes (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   slug text generated always as (data->>'slug') stored,
   "group" text generated always as (data->>'group') stored,
@@ -44,11 +59,13 @@ create table if not exists attributes (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists attributes_owner_idx on attributes (owner_id);
 create index if not exists attributes_group_idx on attributes ("group");
 
 -- --------------------------------------------------------------- reactions
 create table if not exists reactions (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   code text generated always as (data->>'code') stored,
   polarity text generated always as (data->>'polarity') stored,
@@ -57,40 +74,48 @@ create table if not exists reactions (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists reactions_owner_idx on reactions (owner_id);
 create index if not exists reactions_order_idx on reactions ("order");
 
 -- ----------------------------------------------------------------- surveys
 create table if not exists surveys (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   kind text generated always as (data->>'kind') stored,
   status text generated always as (data->>'status') stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists surveys_owner_idx on surveys (owner_id);
 
 -- -------------------------------------------------------------------- tags
 create table if not exists tags (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   name text generated always as (data->>'name') stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists tags_owner_idx on tags (owner_id);
 create index if not exists tags_name_idx on tags (name);
 
 -- ------------------------------------------------------------- populations
 create table if not exists populations (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   name text generated always as (data->>'name') stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists populations_owner_idx on populations (owner_id);
 
 -- ----------------------------------------------------------------- runs
 create table if not exists runs (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   persona_id text generated always as (data->>'personaId') stored,
   survey_id text generated always as (data->>'surveyId') stored,
@@ -98,6 +123,7 @@ create table if not exists runs (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists runs_owner_idx on runs (owner_id);
 create index if not exists runs_persona_idx on runs (persona_id);
 create index if not exists runs_survey_idx on runs (survey_id);
 create index if not exists runs_status_idx on runs (status);
@@ -105,19 +131,24 @@ create index if not exists runs_status_idx on runs (status);
 -- --------------------------------------------------------------- results
 create table if not exists results (
   id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
   data jsonb not null default '{}'::jsonb,
   reading_run_id text generated always as (data->>'readingRunId') stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create index if not exists results_owner_idx on results (owner_id);
 create index if not exists results_run_idx on results (reading_run_id);
 
 -- ------------------------------------------------------------------- meta
--- key/value simples (flags de seed, preferências de app).
+-- key/value simples (flags de seed, preferências de app). A mesma `key`
+-- pode existir uma vez por usuário sem colidir — chave primária composta.
 create table if not exists meta (
-  key text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  key text not null,
   value jsonb,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  primary key (owner_id, key)
 );
 
 -- ------------------------------------------------------- trigger updated_at
@@ -132,10 +163,11 @@ begin
 end $$;
 
 -- ================================================================== RLS
--- Sem tela de login nesta fase: qualquer sessão autenticada (inclusive
--- anônima, via supabase.auth.signInAnonymously()) tem acesso de
--- leitura/escrita a um workspace compartilhado. Não habilite acesso ao
--- papel `anon` sem sessão — apenas `authenticated`.
+-- Cada usuário só enxerga/edita as próprias linhas: toda operação exige
+-- owner_id = auth.uid(). Não há mais workspace compartilhado nem acesso
+-- ao papel `anon` — apenas `authenticated` com sessão de e-mail+senha
+-- (supabase.auth.signInWithPassword, ver js/db.js). Mantenha "Allow
+-- anonymous sign-ins" DESABILITADO em Authentication → Settings.
 do $$
 declare t text;
 begin
@@ -143,13 +175,14 @@ begin
   loop
     execute format('alter table %1$s enable row level security;', t);
     execute format('drop policy if exists %1$s_rw on %1$s;', t);
-    execute format(
-      'create policy %1$s_rw on %1$s for all to authenticated using (true) with check (true);',
-      t
-    );
+    execute format('drop policy if exists %1$s_select on %1$s;', t);
+    execute format('drop policy if exists %1$s_insert on %1$s;', t);
+    execute format('drop policy if exists %1$s_update on %1$s;', t);
+    execute format('drop policy if exists %1$s_delete on %1$s;', t);
+    execute format('create policy %1$s_select on %1$s for select to authenticated using (owner_id = auth.uid());', t);
+    execute format('create policy %1$s_insert on %1$s for insert to authenticated with check (owner_id = auth.uid());', t);
+    execute format('create policy %1$s_update on %1$s for update to authenticated using (owner_id = auth.uid()) with check (owner_id = auth.uid());', t);
+    execute format('create policy %1$s_delete on %1$s for delete to authenticated using (owner_id = auth.uid());', t);
   end loop;
 end $$;
 
--- Lembrete: habilite "Allow anonymous sign-ins" em
--- Authentication → Settings no Dashboard do Supabase para que
--- supabase.auth.signInAnonymously() funcione (usado por js/db.js).

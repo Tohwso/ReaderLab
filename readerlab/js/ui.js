@@ -1,7 +1,7 @@
 // ============ ReaderLab — Interface (views e componentes) ============
 import * as S from "./store.js";
 import * as D from "./domain.js";
-import { persistenceMode } from "./db.js";
+import { persistenceMode, signOut } from "./db.js";
 import { getLLMConfig, getProvider, ProviderError, providerErrorMessage } from "./llm/provider.js";
 import { buildReadingPrompt } from "./llm/promptBuilder.js";
 import { validateLLMResponse } from "./llm/validate.js";
@@ -18,6 +18,57 @@ const fmtDate = (iso) => {
 };
 const options = (obj, selected) =>
   Object.entries(obj).map(([v, l]) => `<option value="${v}" ${v === selected ? "selected" : ""}>${l}</option>`).join("");
+
+// ------------------------------------------------------------------ Login
+export function renderLogin({ onSubmit }) {
+  document.getElementById("app").innerHTML = `
+    <div class="login-screen">
+      <div class="login-card">
+        <div class="brand" style="justify-content:center;padding-bottom:6px">
+          <div class="brand-mark">R</div>
+          <div><div class="brand-name">ReaderLab</div><div class="brand-sub">Synthetic Readers</div></div>
+        </div>
+        <p class="muted small" style="text-align:center;margin:0 0 20px">Acesso restrito. Sua conta é criada pelo administrador no Supabase — não há cadastro público.</p>
+        <form id="login-form" novalidate>
+          <div class="field">
+            <label for="login-email">E-mail</label>
+            <input type="email" id="login-email" autocomplete="username" required>
+          </div>
+          <div class="field">
+            <label for="login-password">Senha</label>
+            <input type="password" id="login-password" autocomplete="current-password" required>
+          </div>
+          <div id="login-error" class="info-box warn" style="display:none;margin-bottom:14px"></div>
+          <button type="submit" class="btn btn-primary" id="login-submit" style="width:100%;justify-content:center">Entrar</button>
+        </form>
+      </div>
+    </div>`;
+  const form = $("#login-form");
+  const errBox = $("#login-error");
+  const submitBtn = $("#login-submit");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = $("#login-email").value.trim();
+    const password = $("#login-password").value;
+    errBox.style.display = "none";
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Entrando…";
+    try {
+      const message = await onSubmit(email, password);
+      if (message) {
+        errBox.style.display = "flex";
+        errBox.innerHTML = `<span>⚠</span><span>${esc(message)}</span>`;
+      }
+    } catch (err) {
+      errBox.style.display = "flex";
+      errBox.innerHTML = `<span>⚠</span><span>${esc(String(err && err.message || err))}</span>`;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Entrar";
+    }
+  });
+  $("#login-email").focus();
+}
 
 // ------------------------------------------------------------------ Toasts
 export function toast(msg, type = "") {
@@ -102,7 +153,10 @@ export function renderApp() {
               <span>${label}</span>${key !== null ? `<span class="count">${countFor(key)}</span>` : ""}
             </a>`).join("")}
         </nav>
-        <div class="sidebar-foot">Backend: Supabase<br>LLM: proxy seguro (Edge Function)</div>
+        <div class="sidebar-foot">
+          Backend: Supabase<br>LLM: proxy seguro (Edge Function)
+          <div style="margin-top:10px"><button type="button" class="btn btn-ghost btn-sm" id="logout-btn">Sair</button></div>
+        </div>
       </aside>
       <div class="main-col">
         ${persistenceMode !== "supabase" ? `
@@ -113,6 +167,7 @@ export function renderApp() {
         <main class="main" id="main"></main>
       </div>
     </div>`;
+  $("#logout-btn").addEventListener("click", () => signOut());
   window.addEventListener("hashchange", renderRoute);
   renderRoute();
 }

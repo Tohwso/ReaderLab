@@ -16,6 +16,20 @@ export const state = {
 
 const byUpdated = (a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "");
 
+// Limpa o estado em memória (logout/expiração de sessão) — evita que dados
+// do usuário anterior fiquem visíveis/residentes até o próximo login.
+export function resetState() {
+  state.personas = [];
+  state.attributes = [];
+  state.reactions = [];
+  state.surveys = [];
+  state.tags = [];
+  state.populations = [];
+  state.runs = [];
+  state.results = [];
+  state.ready = false;
+}
+
 function sortAll() {
   state.personas.sort(byUpdated);
   state.attributes.sort((a, b) => a.group.localeCompare(b.group) || a.name.localeCompare(b.name));
