@@ -380,17 +380,25 @@ function refreshListOnly(main) {
 }
 
 // ------------------------------------------------------- Editor de persona
+// attributeValues contém SOMENTE atributos explicitamente configurados nesta
+// Persona — ausência de chave != valor padrão. O checkbox "Definido" é o
+// único jeito de entrar/sair de attributeValues.
 function attrEditorHTML(a, value) {
-  const v = value != null ? value : a.defaultValue != null ? a.defaultValue : a.min;
+  const defined = value != null;
+  const fallback = a.defaultValue != null ? a.defaultValue : a.min;
+  const display = defined ? value : fallback;
   return `
     <div class="attr-editor">
       <div class="attr-editor-head">
-        <span class="attr-editor-name">${esc(a.name)}</span>
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;min-width:0">
+          <input type="checkbox" data-attr-toggle="${a.id}" ${defined ? "checked" : ""}>
+          <span class="attr-editor-name">${esc(a.name)}</span>
+        </label>
         <span class="attr-editor-group">${esc(a.group)}</span>
       </div>
       <div class="attr-editor-body">
         <span class="ext">${a.min}</span>
-        <input type="range" min="${a.min}" max="${a.max}" step="1" value="${v}" data-attr="${a.id}">
+        <input type="range" min="${a.min}" max="${a.max}" step="1" value="${display}" data-attr="${a.id}" ${defined ? "" : "disabled"}>
         <span class="ext max">${a.max}</span>
       </div>
       <div class="attr-editor-foot">
@@ -398,8 +406,9 @@ function attrEditorHTML(a, value) {
           ${a.minLabel ? `<span><b>${a.min}</b> ${esc(a.minLabel)}</span>` : ""}
           ${a.maxLabel ? `<span><b>${a.max}</b> ${esc(a.maxLabel)}</span>` : ""}
         </div>
-        <input type="number" class="attr-num" min="${a.min}" max="${a.max}" step="1" value="${v}" data-attr-num="${a.id}">
+        <input type="number" class="attr-num" min="${a.min}" max="${a.max}" step="1" value="${display}" data-attr-num="${a.id}" ${defined ? "" : "disabled"}>
       </div>
+      <div class="faint small">${defined ? `Valor da Persona: ${display}` : `Padrão sugerido: ${display} (não definido nesta Persona)`}</div>
     </div>`;
 }
 
@@ -408,18 +417,18 @@ function viewPersonaForm(main, id) {
   const existing = isNew ? null : S.state.personas.find((p) => p.id === id);
   if (!isNew && !existing) { location.hash = "#/personas"; return; }
   const draft = existing ? structuredClone(existing) : D.blankPersona();
-  S.state.attributes.filter((a) => a.status === "ativa").forEach((a) => {
-    if (draft.attributeValues[a.id] == null) draft.attributeValues[a.id] = a.defaultValue != null ? a.defaultValue : a.min;
-  });
-  const attrsByGroup = {};
-  S.state.attributes.filter((a) => a.status === "ativa").forEach((a) => {
-    (attrsByGroup[a.group] = attrsByGroup[a.group] || []).push(a);
-  });
+  const renderAttrGroups = () => {
+    const attrsByGroup = {};
+    S.state.attributes.filter((a) => a.status === "ativa").forEach((a) => {
+      (attrsByGroup[a.group] = attrsByGroup[a.group] || []).push(a);
+    });
+    return Object.entries(attrsByGroup).map(([g, attrs]) => `
+      <div class="group-title">${esc(g)}</div>
+      <div class="attrs-grid">${attrs.map((a) => attrEditorHTML(a, draft.attributeValues[a.id])).join("")}</div>`).join("");
+  };
   const textField = (field, label, opts = "") => `
     <div class="field"><label>${label}</label><textarea data-field="${field}" ${opts}>${esc(draft[field] || "")}</textarea></div>`;
-  const groups = Object.entries(attrsByGroup).map(([g, attrs]) => `
-    <div class="group-title">${esc(g)}</div>
-    <div class="attrs-grid">${attrs.map((a) => attrEditorHTML(a, draft.attributeValues[a.id])).join("")}</div>`).join("");
+  const groups = renderAttrGroups();
 
   main.innerHTML = `
     ${pageHead(isNew ? "Nova persona" : `Editar persona · ${esc(existing.name || "sem nome")}`,
@@ -440,7 +449,7 @@ function viewPersonaForm(main, id) {
       </div>
 
       <div class="section-title">Atributos</div>
-      ${groups || `<div class="empty-state"><div class="big">Nenhum atributo ativo</div><p>Ative ou crie atributos no módulo Atributos.</p></div>`}
+      <div id="pf-attrs">${groups || `<div class="empty-state"><div class="big">Nenhum atributo ativo</div><p>Ative ou crie atributos no módulo Atributos.</p></div>`}</div>
 
       <div class="section-title">Perfil narrativo</div>
       <div class="form-grid">
@@ -475,7 +484,17 @@ function viewPersonaForm(main, id) {
   };
   const onInput = (e) => {
     const t = e.target;
-    if (t.dataset.attr) {
+    if (t.dataset.attrToggle) {
+      if (e.type !== "change") return; // evita processar duas vezes (input+change)
+      const attrId = t.dataset.attrToggle;
+      const a = S.state.attributes.find((x) => x.id === attrId);
+      if (t.checked) {
+        if (draft.attributeValues[attrId] == null) draft.attributeValues[attrId] = a.defaultValue != null ? a.defaultValue : a.min;
+      } else {
+        delete draft.attributeValues[attrId];
+      }
+      $("#pf-attrs").innerHTML = renderAttrGroups() || `<div class="empty-state"><div class="big">Nenhum atributo ativo</div><p>Ative ou crie atributos no módulo Atributos.</p></div>`;
+    } else if (t.dataset.attr) {
       const a = S.state.attributes.find((x) => x.id === t.dataset.attr);
       let v = parseInt(t.value, 10);
       if (isNaN(v)) v = a.defaultValue ?? a.min;
