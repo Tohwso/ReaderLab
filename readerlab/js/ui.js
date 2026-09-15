@@ -5,7 +5,7 @@ import { persistenceMode, signOut } from "./db.js";
 import { getLLMConfig } from "./llm/provider.js";
 import { renderRunResultView } from "./components/runResultView.js";
 import { executeReadingRun, executePopulationRun, resumePopulationRun, cancelPopulationRun, isPopulationRunActive } from "./engine.js";
-import { SEGMENT_RULE_OPS, filterPersonasBySegment, computeQuestionStats, computeReactionAggregates } from "./analytics/populationMetrics.js";
+import { SEGMENT_RULE_OPS, filterPersonasBySegment, computeQuestionStats, computeReactionAggregates, collectQuestionAnswers, computeBooleanStats, computeChoiceStats } from "./analytics/populationMetrics.js";
 import { runPopulationAnalysis } from "./analysisEngine.js";
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -227,16 +227,17 @@ function statusBadge(status) {
 function viewDashboard(main) {
   const stats = [
     ["Personas", S.state.personas.length, "#/personas", "leitores sintéticos modelados"],
-    ["Atributos", S.state.attributes.length, "#/atributos", "características do catálogo"],
-    ["Tipos de reação", S.state.reactions.length, "#/reacoes", "eventos de leitura"],
     ["Pesquisas", S.state.surveys.length, "#/pesquisas", "questionários estruturados"],
+    ["Execuções individuais", S.state.runs.length, "#/execucoes", "ReadingRuns (1 Persona + 1 Pesquisa)"],
+    ["Populações", S.state.populations.length, "#/populacoes", "grupos de Personas para execução em lote"],
+    ["Execuções de população", S.state.populationRuns.length, "#/populacoes", "PopulationRuns já executadas"],
   ];
   const recent = S.state.personas.slice(0, 5);
   main.innerHTML = `
-    ${pageHead("Dashboard", "Laboratório experimental de leitores sintéticos — modelagem de personas, reações e pesquisas, sem execução de agentes nesta fase.")}
+    ${pageHead("Dashboard", "Laboratório de leitores sintéticos — modele Personas e Pesquisas, execute leituras individuais ou populacionais, e explore os resultados via Population Analytics, Segmentos e Research Analyst.")}
     <div class="info-box" style="margin-bottom:20px">
       <span>ⓘ</span>
-      <span><b>Princípio central:</b> o ReaderLab prioriza divergência e diversidade de comportamento — não consenso artificial entre agentes. Tudo o que você configurar aqui será o contrato de domínio para as futuras execuções de leitura.</span>
+      <span><b>Princípio central:</b> o ReaderLab prioriza divergência e diversidade de comportamento — não consenso artificial entre agentes. As estatísticas de uma execução (média, mediana, desvio, divergência, segmentos) são sempre calculadas pelo próprio ReaderLab; o Research Analyst apenas interpreta, com IA, esses números já calculados.</span>
     </div>
     <div class="cards" style="margin-bottom:26px">
       ${stats.map(([label, num, href, hint]) => `
@@ -723,7 +724,7 @@ function surveyKindBadge(kind) {
 
 function viewSurveys(main) {
   main.innerHTML = `
-    ${pageHead("Pesquisas", "Questionários estruturados que os leitores sintéticos responderão futuramente — por capítulo, por seção, ao final ou sob demanda.",
+    ${pageHead("Pesquisas", "Questionários estruturados que os leitores sintéticos respondem durante uma execução — por capítulo, por seção, ao final ou sob demanda.",
       `<button class="btn btn-primary" id="sv-new">+ Nova pesquisa</button>`)}
     ${S.state.surveys.length === 0
       ? `<div class="empty-state"><div class="big">Nenhuma pesquisa criada</div><p>Crie a partir de um template ou comece do zero.</p></div>`
@@ -1389,6 +1390,11 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   let customPresets = [];
   let analysisRunning = false;
   let selectedAnalysisId = null;
+  let perguntasSearch = "";
+  let perguntasTypeFilter = "";
+  // Perguntas com a lista de respostas individuais expandida (por padrão
+  // recolhida — a mesma convenção já usada na aba Reações).
+  let openPerguntaIds = new Set();
 
   // Link contextual para o relatório individual — preserva de onde veio
   // (esta PopulationRun + aba atual) para o botão "Voltar" funcionar.
@@ -1967,6 +1973,131 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
       ${selected ? renderAnalysisReport(selected) : (!analysisRunning ? `<div class="empty-state"><div class="big">Nenhuma análise gerada ainda</div><p>Clique em "Gerar análise com IA" para que o Research Analyst interprete os resultados desta execução.</p></div>` : "")}`;
   };
 
+  // ---------------------------------------------------------- Perguntas
+  // Explora a Survey pergunta por pergunta, na ORDEM ORIGINAL do snapshot
+  // congelado — nenhuma chamada à LLM, apenas leitura de ReadingResults já
+  // persistidos. Estatísticas quantitativas reutilizam computeQuestionStats
+  // (mesma fórmula do Heatmap/Research Analyst); os demais tipos só somam
+  // respostas já dadas — nenhum cálculo novo é inventado.
+  const perguntasQuestions = () => snapshotSurvey?.questions || [];
+
+  const matchesPerguntasSearch = (persona) => {
+    if (!perguntasSearch.trim()) return true;
+    const q = perguntasSearch.trim().toLowerCase();
+    return (persona?.code || "").toLowerCase().includes(q) || (persona?.name || "").toLowerCase().includes(q);
+  };
+
+  const answerRowLabel = (entry) => {
+    const name = entry.persona ? `${entry.persona.code ? esc(entry.persona.code) + " — " : ""}${esc(entry.persona.name)}` : "(persona removida)";
+    return entry.run ? `<a href="${runReportLink(entry.run.id)}">${name}</a>` : name;
+  };
+
+  // Valor formatado de UMA resposta, por tipo — ausência nunca vira 0/false/"".
+  const formatAnswerValue = (q, entry) => {
+    if (entry.run.status !== "COMPLETED") return `<span class="faint">sem resposta</span>`;
+    if (!entry.answered) return `<span class="faint">—</span>`;
+    switch (q.type) {
+      case "scale":
+      case "number":
+        return `<b class="mono">${esc(String(entry.value))}</b> <span class="faint small">/ ${esc(String(q.max ?? "—"))}</span>`;
+      case "boolean":
+        return `<b>${entry.value ? "Sim" : "Não"}</b>`;
+      case "single_choice":
+        return `<b>${esc(String(entry.value))}</b>`;
+      case "multiple_choice":
+        return Array.isArray(entry.value) && entry.value.length
+          ? entry.value.map((v) => `<span class="badge neutral">${esc(v)}</span>`).join(" ")
+          : `<span class="faint">(nenhuma opção)</span>`;
+      default: // short_text / long_text
+        return `<p class="qual-value" style="margin:0;white-space:pre-wrap">${esc(String(entry.value))}</p>`;
+    }
+  };
+
+  const renderAnswerList = (q, entries) => {
+    const visible = entries.filter((e) => matchesPerguntasSearch(e.persona));
+    if (!visible.length) return `<p class="faint small">Nenhum leitor corresponde à busca.</p>`;
+    const isLongForm = q.type === "short_text" || q.type === "long_text";
+    return `<div class="pr-status-list">
+      ${visible.map((e) => `
+        <div class="pr-status-item" style="${isLongForm ? "flex-direction:column;align-items:stretch;gap:6px" : ""}">
+          <div class="pr-status-main"><div>${answerRowLabel(e)}</div></div>
+          <div class="pr-status-side" style="${isLongForm ? "width:100%" : ""}">${formatAnswerValue(q, e)}</div>
+        </div>`).join("")}
+    </div>`;
+  };
+
+  const renderQuestionCard = (q) => {
+    const entries = collectQuestionAnswers(q, runs, snapshotPersonas, S.getResultForRun);
+    const open = openPerguntaIds.has(q.id);
+    const toggleBtn = `<button type="button" class="btn btn-sm btn-ghost" data-toggle-pergunta="${q.id}">${open ? "Ocultar respostas individuais" : "Ver respostas individuais"}</button>`;
+
+    let summaryHTML = "";
+    if (q.type === "scale" || q.type === "number") {
+      const { stats } = computeQuestionStats([q], runs, snapshotPersonas, S.getResultForRun)[0];
+      summaryHTML = stats.n === 0 ? `<p class="faint small">Sem respostas válidas.</p>` : `
+        <div class="qstat-row"><span>N válido</span><b class="mono">${stats.n}</b></div>
+        <div class="qstat-row"><span>Média</span><b class="mono">${stats.mean.toFixed(1)} / ${esc(String(q.max ?? "—"))}</b></div>
+        <div class="qstat-row"><span>Mediana</span><b class="mono">${stats.median.toFixed(1)}</b></div>
+        <div class="qstat-row"><span>Mínimo</span><b class="mono">${stats.min}</b></div>
+        <div class="qstat-row"><span>Máximo</span><b class="mono">${stats.max}</b></div>
+        <div class="qstat-row"><span>Desvio padrão</span><b class="mono">${stats.standardDeviation.toFixed(1)}</b></div>
+        ${stats.divergence != null
+          ? `<div class="qstat-row"><span>Índice de divergência</span><b class="mono">${Math.round(stats.divergence * 100)}%</b></div>
+             <span class="badge ${stats.classification.cls}">${stats.classification.label}</span>`
+          : `<p class="faint small">Escala sem amplitude — divergência não calculada.</p>`}`;
+    } else if (q.type === "boolean") {
+      const { n, yes, no } = computeBooleanStats(entries);
+      summaryHTML = n === 0 ? `<p class="faint small">Sem respostas válidas.</p>` : `
+        <div class="qstat-row"><span>N válido</span><b class="mono">${n}</b></div>
+        <div class="qstat-row"><span>Sim</span><b class="mono">${yes}</b></div>
+        <div class="qstat-row"><span>Não</span><b class="mono">${no}</b></div>`;
+    } else if (q.type === "single_choice" || q.type === "multiple_choice") {
+      const { n, counts } = computeChoiceStats(q, entries);
+      summaryHTML = n === 0 ? `<p class="faint small">Sem respostas válidas.</p>` : `
+        <div class="qstat-row"><span>N válido</span><b class="mono">${n}</b></div>
+        ${counts.map((c) => `<div class="qstat-row"><span>${esc(c.option)}</span><b class="mono">${c.count}</b></div>`).join("")}`;
+    } else {
+      const answered = entries.filter((e) => e.answered).length;
+      summaryHTML = `<div class="qstat-row"><span>N válido</span><b class="mono">${answered}</b></div>`;
+    }
+
+    return `
+      <div class="card" style="margin-bottom:14px">
+        <div class="q-meta" style="margin-bottom:8px">
+          <span class="badge accent">${esc(D.QUESTION_TYPES[q.type] || q.type)}</span>
+        </div>
+        <div class="qstat-title" style="margin-bottom:8px">${esc(q.text)}</div>
+        ${summaryHTML}
+        <div style="margin-top:10px">${toggleBtn}</div>
+        ${open ? `<div style="margin-top:10px">${renderAnswerList(q, entries)}</div>` : ""}
+      </div>`;
+  };
+
+  const renderPerguntasCards = () => {
+    const questions = perguntasQuestions();
+    const filtered = questions.filter((q) => !perguntasTypeFilter || q.type === perguntasTypeFilter);
+    return filtered.length ? filtered.map(renderQuestionCard).join("") : `<p class="faint small">Nenhuma pergunta corresponde ao filtro de tipo.</p>`;
+  };
+
+  const renderPerguntasTab = () => {
+    const questions = perguntasQuestions();
+    if (!questions.length) {
+      return `<div class="empty-state"><div class="big">Sem perguntas</div><p>Esta Survey não possui perguntas configuradas.</p></div>`;
+    }
+    const filtered = questions.filter((q) => !perguntasTypeFilter || q.type === perguntasTypeFilter);
+    const typesPresent = [...new Set(questions.map((q) => q.type))];
+    return `
+      <div class="heatmap-toolbar">
+        <input type="text" class="search-input" id="perguntas-search" placeholder="Buscar por leitor (nome/código)…" value="${esc(perguntasSearch)}">
+        <select id="perguntas-type-filter">
+          <option value="">Tipo: todas</option>
+          ${typesPresent.map((t) => `<option value="${t}" ${perguntasTypeFilter === t ? "selected" : ""}>${esc(D.QUESTION_TYPES[t] || t)}</option>`).join("")}
+        </select>
+        <span class="muted small" style="margin-left:auto" id="perguntas-count">${filtered.length} de ${questions.length} pergunta(s)</span>
+      </div>
+      <div id="perguntas-cards">${renderPerguntasCards()}</div>`;
+  };
+
   const renderTabContent = () => {
     if (activeTab === "resumo") {
       return `
@@ -1979,13 +2110,13 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
           <div class="kv" style="margin-bottom:6px"><b class="muted">Survey:</b>&nbsp;${esc(survey ? survey.name : "(pesquisa removida)")}</div>
           <div class="kv" style="margin-bottom:6px"><b class="muted">Modelo:</b>&nbsp;${esc(popRun.provider)} / ${esc(popRun.model)} · prompt ${esc(popRun.promptVersion)}</div>
           <div class="kv"><b class="muted">Tempo total:</b>&nbsp;${fmtDuration(popRun.startedAt, popRun.completedAt)}</div>
-        </div>
-        <p class="faint small" style="margin-top:14px">Estatísticas agregadas (divergência entre leitores, heatmap de reações, respostas por pergunta) chegam em uma próxima etapa.</p>`;
+        </div>`;
     }
     if (activeTab === "heatmap") return renderHeatmapTab();
     if (activeTab === "reacoes") return renderReacoesTab();
     if (activeTab === "segmentos") return renderSegmentosTab();
     if (activeTab === "analise") return renderAnaliseTab();
+    if (activeTab === "perguntas") return renderPerguntasTab();
     if (activeTab === "leitores") {
       return `
         <div class="pr-status-list">
@@ -2020,7 +2151,7 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
           </div>
         </div>`;
     }
-    return `<div class="empty-state"><div class="big">Em breve</div><p>Este módulo será implementado na próxima etapa.</p></div>`;
+    return `<div class="empty-state"><div class="big">Aba desconhecida</div></div>`;
   };
 
   const renderAll = () => {
@@ -2149,6 +2280,28 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
       });
     }
 
+    if (activeTab === "perguntas") {
+      const bindPerguntasCards = () => {
+        $$("[data-toggle-pergunta]", main).forEach((b) => b.addEventListener("click", () => {
+          const id = b.dataset.togglePergunta;
+          if (openPerguntaIds.has(id)) openPerguntaIds.delete(id); else openPerguntaIds.add(id);
+          renderAll();
+        }));
+      };
+      bindPerguntasCards();
+      // Busca por leitor só atualiza a lista de cards (não a página inteira)
+      // para não perder o foco/cursor do campo a cada tecla digitada.
+      main.querySelector("#perguntas-search")?.addEventListener("input", (e) => {
+        perguntasSearch = e.target.value;
+        const container = main.querySelector("#perguntas-cards");
+        if (container) { container.innerHTML = renderPerguntasCards(); bindPerguntasCards(); }
+      });
+      main.querySelector("#perguntas-type-filter")?.addEventListener("change", (e) => {
+        perguntasTypeFilter = e.target.value;
+        renderAll();
+      });
+    }
+
     if (activeTab === "analise") {
       main.querySelector("#analysis-generate")?.addEventListener("click", async () => {
         if (analysisRunning) return;
@@ -2230,7 +2383,7 @@ function viewTags(main) {
 // ================================================================= DADOS
 function viewData(main) {
   main.innerHTML = `
-    ${pageHead("Dados", "Importação e exportação das configurações. O JSON é pensado para futuramente alimentar diretamente o motor de agentes.")}
+    ${pageHead("Dados", "Importação e exportação das configurações (Personas, atributos, reações, pesquisas, tags e populações) usadas pelo motor de execução.")}
     <div class="cards" style="margin-bottom:16px">
       <div class="card">
         <div class="stat-label" style="margin-bottom:8px">Exportação completa (JSON)</div>
@@ -2399,7 +2552,7 @@ function viewNewRun(main) {
           <input type="radio" name="rn-mode" value="llm" ${cfg.endpoint ? "" : "disabled"}>
           LLM real via proxy ${cfg.endpoint ? "" : "(indisponível — nenhum backend configurado)"}
         </label>
-        <label class="checkbox-row faint" style="padding-left:0"><input type="radio" name="rn-mode" disabled> População — em breve</label>
+        <span class="hint">Esta tela executa uma leitura com <b>uma</b> Persona. Para rodar a mesma Pesquisa com uma população inteira de leitores, use <a href="#/populacoes">Populações</a>.</span>
       </div>
 
       <details class="card" style="margin-bottom:8px">

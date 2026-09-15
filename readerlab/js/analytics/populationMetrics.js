@@ -85,3 +85,41 @@ export function computeReactionAggregates(reactionDefs, runsSubset, personas, ge
   });
   return { validCount, stats };
 }
+
+// Resposta de cada ReadingRun a UMA pergunta — usada pela aba Perguntas para
+// listar respostas individuais de qualquer tipo (não só quantitativas).
+// ReadingRun não-COMPLETED (ex.: FAILED) nunca tem `answered=true`; uma
+// resposta ausente (pergunta não respondida por aquele leitor) também fica
+// `answered=false` — nunca inventamos 0/false/"" para ausência.
+export function collectQuestionAnswers(question, runsSubset, personas, getResult) {
+  return runsSubset.map((run) => {
+    const persona = personas.find((p) => p.id === run.personaId);
+    if (run.status !== "COMPLETED") return { run, persona, value: null, answered: false };
+    const ans = getResult(run.id)?.surveyAnswers.find((a) => a.questionId === question.id);
+    return { run, persona, value: ans ? ans.value : null, answered: !!ans };
+  });
+}
+
+// Agregação simples Sim/Não para perguntas booleanas — nunca calculada como
+// média numérica (não faz sentido no domínio: não existe "0.7 de Sim").
+export function computeBooleanStats(entries) {
+  const answered = entries.filter((e) => e.answered);
+  return {
+    n: answered.length,
+    yes: answered.filter((e) => e.value === true).length,
+    no: answered.filter((e) => e.value === false).length,
+  };
+}
+
+// Distribuição por opção — serve tanto single_choice (1 opção por leitor)
+// quanto multiple_choice (uma Persona pode contribuir para várias opções).
+export function computeChoiceStats(question, entries) {
+  const counts = new Map((question.options || []).map((o) => [o, 0]));
+  let n = 0;
+  entries.filter((e) => e.answered).forEach((e) => {
+    n++;
+    const values = Array.isArray(e.value) ? e.value : [e.value];
+    values.forEach((v) => { if (counts.has(v)) counts.set(v, counts.get(v) + 1); });
+  });
+  return { n, counts: [...counts.entries()].map(([option, count]) => ({ option, count })) };
+}
