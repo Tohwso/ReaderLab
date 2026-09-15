@@ -1558,11 +1558,6 @@ const runStatusBadge = (status) => {
   const cls = { COMPLETED: "ok", FAILED: "bad", RUNNING: "accent", PENDING: "neutral" }[status] || "neutral";
   return `<span class="badge ${cls}">${D.RUN_STATUS[status] || esc(status)}</span>`;
 };
-const fmtDuration = (a, b) => {
-  if (!a || !b) return "—";
-  const s = Math.round((new Date(b) - new Date(a)) / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}min ${s % 60}s`;
-};
 
 function viewRuns(main) {
   main.innerHTML = `
