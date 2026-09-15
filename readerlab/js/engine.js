@@ -6,7 +6,7 @@
 // reimplementa o motor: apenas dispara N ReadingRuns através dele.
 import * as S from "./store.js";
 import * as D from "./domain.js";
-import { getProvider, ProviderError, providerErrorMessage } from "./llm/provider.js";
+import { getProvider, getLLMConfig, ProviderError, providerErrorMessage } from "./llm/provider.js";
 import { buildReadingPrompt } from "./llm/promptBuilder.js";
 import { validateLLMResponse } from "./llm/validate.js";
 import { DemoProvider } from "./llm/demoProvider.js";
@@ -74,44 +74,124 @@ export async function executeReadingRun(run, { persona, survey, mode, liveCfg })
   }
 }
 
-// Orquestra uma PopulationRun: cria e executa, SEQUENCIALMENTE (uma de
-// cada vez, sem paralelismo nesta primeira versão), uma ReadingRun
-// independente por Persona — mesmo texto, mesma Survey, mesma config de
-// modelo. Personas não compartilham resposta/memória/contexto entre si.
-// Falha de uma Persona não cancela as demais (falha parcial vira PARTIAL).
-export async function executePopulationRun(popRun, { population, personas, survey, mode, liveCfg, onProgress }) {
-  popRun.status = "RUNNING";
-  popRun.startedAt = D.nowISO();
-  const activeReactions = S.state.reactions.filter((r) => r.status === "ativa");
-  popRun.executionSnapshot = D.buildPopulationExecutionSnapshot({
-    population, personas, survey, reactions: activeReactions,
-    provider: popRun.provider, model: popRun.model, promptVersion: popRun.promptVersion,
-  });
-  await S.savePopulationRun(popRun);
+// IDs de PopulationRun com um loop ativo NESTA aba — evita disparar duas
+// vezes a mesma orquestração (ex.: a tela de acompanhamento tentando
+// "retomar" uma execução que a própria submissão do formulário já está
+// rodando em background).
+const inFlight = new Set();
 
-  let completed = 0, failed = 0;
-  for (const persona of personas) {
-    const run = D.blankRun();
-    run.populationRunId = popRun.id;
-    run.title = popRun.title ? `${popRun.title} — ${persona.name}` : `População — ${persona.name}`;
-    run.personaId = persona.id;
-    run.surveyId = survey.id;
-    run.inputText = popRun.inputText;
-    const isDemo = mode === "demo";
-    run.provider = isDemo ? "demo-local" : liveCfg.provider;
-    run.model = isDemo ? "simulador-v1" : "";
-    run.promptVersion = liveCfg.promptVersion;
-    await S.saveRun(run);
-    onProgress?.({ phase: "start", persona, run, completed, failed, total: personas.length });
+// Núcleo do laço sequencial, compartilhado entre início e retomada: opera
+// sempre sobre a lista de Personas congelada em popRun.executionSnapshot
+// (nunca a Population ao vivo, que pode ter mudado). Pula Personas cuja
+// ReadingRun já terminou (COMPLETED/FAILED) — é isso que permite retomar
+// uma PopulationRun interrompida (ex.: recarregamento de página) sem
+// duplicar leituras já concluídas. Reconsulta o status ao vivo a cada
+// iteração para respeitar um cancelamento pedido no meio da execução.
+async function runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress }) {
+  const snapshotPersonas = popRun.executionSnapshot.personas;
+  const total = snapshotPersonas.length;
 
+  for (const persona of snapshotPersonas) {
+    const live = S.state.populationRuns.find((p) => p.id === popRun.id) || popRun;
+    if (live.status === "CANCELLED") break;
+
+    const existing = S.getReadingRunsForPopulationRun(popRun.id).find((r) => r.personaId === persona.id);
+    if (existing && (existing.status === "COMPLETED" || existing.status === "FAILED")) continue;
+
+    let run = existing;
+    if (!run) {
+      run = D.blankRun();
+      run.populationRunId = popRun.id;
+      run.title = popRun.title ? `${popRun.title} — ${persona.name}` : `População — ${persona.name}`;
+      run.personaId = persona.id;
+      run.surveyId = survey.id;
+      run.inputText = popRun.inputText;
+      const isDemo = mode === "demo";
+      run.provider = isDemo ? "demo-local" : liveCfg.provider;
+      run.model = isDemo ? "simulador-v1" : "";
+      run.promptVersion = liveCfg.promptVersion;
+      await S.saveRun(run);
+    }
+    onProgress?.({ phase: "start", persona, run, total });
     const { ok } = await executeReadingRun(run, { persona, survey, mode, liveCfg });
-    if (ok) completed++; else failed++;
-    onProgress?.({ phase: "done", persona, run, ok, completed, failed, total: personas.length });
+    onProgress?.({ phase: "done", persona, run, ok, total });
   }
 
+  const latest = S.state.populationRuns.find((p) => p.id === popRun.id) || popRun;
+  if (latest.status !== "CANCELLED") {
+    const finalRuns = S.getReadingRunsForPopulationRun(popRun.id);
+    const completed = finalRuns.filter((r) => r.status === "COMPLETED").length;
+    const failed = finalRuns.filter((r) => r.status === "FAILED").length;
+    latest.completedAt = D.nowISO();
+    latest.status = completed === total ? "COMPLETED" : completed === 0 ? "FAILED" : "PARTIAL";
+    if (failed > 0) latest.errorMessage = `${failed} de ${total} leitura(s) falharam.`;
+    await S.savePopulationRun(latest);
+  }
+  return latest;
+}
+
+// Orquestra uma PopulationRun nova: cria o snapshot congelado (Population +
+// Personas + Survey + Reações + config no momento do disparo) e então
+// executa, SEQUENCIALMENTE (uma de cada vez, sem paralelismo nesta
+// primeira versão), uma ReadingRun independente por Persona — mesmo
+// texto, mesma Survey, mesma config de modelo. Personas não compartilham
+// resposta/memória/contexto entre si. Falha de uma Persona não cancela as
+// demais (falha parcial vira PARTIAL). Nunca reimplementa o motor de
+// ReadingRun — cada leitura passa por executeReadingRun().
+export async function executePopulationRun(popRun, { population, personas, survey, mode, liveCfg, onProgress }) {
+  if (inFlight.has(popRun.id)) return popRun;
+  inFlight.add(popRun.id);
+  try {
+    popRun.status = "RUNNING";
+    popRun.startedAt = D.nowISO();
+    const activeReactions = S.state.reactions.filter((r) => r.status === "ativa");
+    popRun.executionSnapshot = D.buildPopulationExecutionSnapshot({
+      population, personas, survey, reactions: activeReactions,
+      provider: popRun.provider, model: popRun.model, promptVersion: popRun.promptVersion,
+    });
+    await S.savePopulationRun(popRun);
+    return await runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress });
+  } finally {
+    inFlight.delete(popRun.id);
+  }
+}
+
+// Retoma uma PopulationRun que ficou presa em RUNNING nesta conta (ex.: a
+// aba foi recarregada no meio da execução) — reaproveita o snapshot já
+// gravado e continua apenas as Personas ainda sem ReadingRun terminada.
+// Não faz nada se já houver um loop ativo para este id nesta aba, ou se a
+// PopulationRun não estiver mais em RUNNING.
+export async function resumePopulationRun(popRunId, { onProgress } = {}) {
+  if (inFlight.has(popRunId)) return null;
+  const popRun = S.state.populationRuns.find((p) => p.id === popRunId);
+  if (!popRun || popRun.status !== "RUNNING" || !popRun.executionSnapshot) return null;
+  inFlight.add(popRunId);
+  try {
+    const survey = S.state.surveys.find((s) => s.id === popRun.surveyId) || popRun.executionSnapshot.survey;
+    const mode = popRun.provider === "demo-local" ? "demo" : "llm";
+    const liveCfg = mode === "llm" ? getLLMConfig() : null;
+    return await runPopulationLoop(popRun, { survey, mode, liveCfg, onProgress });
+  } finally {
+    inFlight.delete(popRunId);
+  }
+}
+
+// true enquanto houver um loop de execução desta PopulationRun rodando
+// nesta aba — usado pela UI para decidir se ainda vale tentar retomar.
+export function isPopulationRunActive(popRunId) {
+  return inFlight.has(popRunId);
+}
+
+// Cancelamento cooperativo: impede que NOVAS ReadingRuns comecem (o loop
+// confere o status a cada iteração e para antes da próxima Persona), mas
+// não aborta uma chamada de LLM já em andamento nem apaga resultados já
+// concluídos.
+export async function cancelPopulationRun(popRunId) {
+  const popRun = S.state.populationRuns.find((p) => p.id === popRunId);
+  if (!popRun || popRun.status !== "RUNNING") return popRun || null;
+  popRun.status = "CANCELLED";
   popRun.completedAt = D.nowISO();
-  popRun.status = failed === 0 ? "COMPLETED" : completed === 0 ? "FAILED" : "PARTIAL";
-  if (failed > 0) popRun.errorMessage = `${failed} de ${personas.length} leitura(s) falharam.`;
+  popRun.errorMessage = "Execução cancelada pelo usuário.";
   await S.savePopulationRun(popRun);
   return popRun;
 }

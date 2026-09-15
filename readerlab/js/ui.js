@@ -4,7 +4,7 @@ import * as D from "./domain.js";
 import { persistenceMode, signOut } from "./db.js";
 import { getLLMConfig } from "./llm/provider.js";
 import { renderRunResultView } from "./components/runResultView.js";
-import { executeReadingRun, executePopulationRun } from "./engine.js";
+import { executeReadingRun, executePopulationRun, resumePopulationRun, cancelPopulationRun, isPopulationRunActive } from "./engine.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -171,7 +171,13 @@ export function renderApp() {
   renderRoute();
 }
 
+// Intervalo de polling da tela de acompanhamento de PopulationRun — só uma
+// rota por vez o mantém vivo; qualquer navegação (inclusive re-render da
+// mesma rota) o encerra antes de montar a próxima view.
+let activePoll = null;
+
 export function renderRoute() {
+  if (activePoll) { clearInterval(activePoll); activePoll = null; }
   const hash = location.hash || "#/dashboard";
   $$("#nav .nav-item").forEach((a) => a.classList.toggle("active", a.dataset.nav === hash || (a.dataset.nav !== "#/dashboard" && hash.startsWith(a.dataset.nav))));
   const parts = hash.replace(/^#\//, "").split("/");
@@ -192,6 +198,7 @@ export function renderRoute() {
     case "populacoes":
       if (param && parts[2] === "executar") return viewExecutePopulation(main, param);
       return viewPopulations(main);
+    case "population-runs": return viewPopulationRunDetail(main, param);
     case "tags": return viewTags(main);
     case "dados": return viewData(main);
     default: return viewDashboard(main);
@@ -1040,11 +1047,6 @@ function viewPopulations(main) {
   }));
 }
 
-function progressBadge(status) {
-  const cls = { aguardando: "neutral", executando: "accent", concluída: "ok", falhou: "bad" }[status] || "neutral";
-  return `<span class="badge ${cls}">${esc(status)}</span>`;
-}
-
 function viewExecutePopulation(main, popId) {
   const pop = S.state.populations.find((p) => p.id === popId);
   if (!pop) { location.hash = "#/populacoes"; return; }
@@ -1118,8 +1120,7 @@ function viewExecutePopulation(main, popId) {
         <a class="btn" href="#/populacoes">Cancelar</a>
         <button type="submit" class="btn btn-primary" id="pr-execute">Executar ${members.length} leitura(s)</button>
       </div>
-    </form>
-    <div id="pr-progress"></div>`;
+    </form>`;
 
   const textEl = $("#pr-text");
   textEl.addEventListener("input", () => { $("#pr-count").textContent = `${textEl.value.length} caracteres`; });
@@ -1149,7 +1150,7 @@ function viewExecutePopulation(main, popId) {
     executing = true;
     const btn = $("#pr-execute");
     btn.disabled = true;
-    btn.textContent = "Executando…";
+    btn.textContent = "Criando execução…";
 
     const liveCfg = getLLMConfig();
     const mode = form.querySelector('input[name="pr-mode"]:checked')?.value || "demo";
@@ -1163,48 +1164,138 @@ function viewExecutePopulation(main, popId) {
     popRun.provider = isDemo ? "demo-local" : liveCfg.provider;
     popRun.model = isDemo ? "simulador-v1" : "";
     popRun.promptVersion = liveCfg.promptVersion;
+    // Persiste em PENDING e navega já para a tela de acompanhamento — a
+    // orquestração roda em background (fora do ciclo de vida desta view) e
+    // essa mesma PopulationRun já está localizável em S.state antes do
+    // redirect, evitando qualquer "não encontrada" transitório.
     await S.savePopulationRun(popRun);
-
-    const progressEl = $("#pr-progress");
-    const rows = new Map(); // personaId -> { persona, status, run }
-    members.forEach((p) => rows.set(p.id, { persona: p, status: "aguardando" }));
-    const renderProgress = () => {
-      progressEl.innerHTML = `
-        <div class="section-title">Progresso</div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Persona</th><th>Status</th><th></th></tr></thead>
-          <tbody>
-            ${[...rows.values()].map((r) => `
-              <tr>
-                <td>${esc(r.persona.code ? r.persona.code + " — " : "")}${esc(r.persona.name)}</td>
-                <td>${progressBadge(r.status)}</td>
-                <td>${r.run ? `<a class="btn btn-sm" href="#/execucoes/${r.run.id}">Ver resultado</a>` : ""}</td>
-              </tr>`).join("")}
-          </tbody>
-        </table></div>`;
-    };
-    renderProgress();
-
-    await executePopulationRun(popRun, {
-      population: pop, personas: members, survey, mode, liveCfg,
-      onProgress: ({ phase, persona, run, ok }) => {
-        const row = rows.get(persona.id);
-        if (!row) return;
-        row.run = run;
-        row.status = phase === "start" ? "executando" : (ok ? "concluída" : "falhou");
-        renderProgress();
-      },
+    location.hash = "#/population-runs/" + popRun.id;
+    executePopulationRun(popRun, { population: pop, personas: members, survey, mode, liveCfg }).catch((err) => {
+      console.error("Falha inesperada ao orquestrar PopulationRun", err);
     });
-
-    btn.textContent = "Concluído";
-    toast(
-      popRun.status === "COMPLETED" ? "Execução de população concluída." :
-      popRun.status === "PARTIAL" ? "Execução concluída com falhas parciais — veja o progresso abaixo." :
-      "Todas as leituras desta população falharam.",
-      popRun.status === "FAILED" ? "bad" : "ok"
-    );
-    executing = false;
   });
+}
+
+// ---------------------------------------------- Acompanhamento de PopulationRun
+// Estados visuais da ReadingRun de cada Persona dentro da PopulationRun —
+// ícone + rótulo textual sempre juntos (status nunca é comunicado só por
+// cor, conforme exigido).
+const RUN_STATE_META = {
+  PENDING: { icon: "○", label: "Aguardando", cls: "neutral" },
+  RUNNING: { icon: "●", label: "Executando…", cls: "accent" },
+  COMPLETED: { icon: "✓", label: "Concluído", cls: "ok" },
+  FAILED: { icon: "✕", label: "Falhou", cls: "bad" },
+};
+
+function populationRunStatusBadge(status) {
+  const cls = { PENDING: "neutral", RUNNING: "accent", COMPLETED: "ok", PARTIAL: "warn", FAILED: "bad", CANCELLED: "neutral" }[status] || "neutral";
+  return `<span class="badge ${cls}">${esc(D.POPULATION_RUN_STATUS[status] || status)}</span>`;
+}
+
+function viewPopulationRunDetail(main, popRunId) {
+  let resumeAttempted = false;
+
+  const render = () => {
+    const popRun = S.state.populationRuns.find((p) => p.id === popRunId);
+    if (!popRun) {
+      main.innerHTML = `${pageHead("Execução de população", "", `<a class="btn" href="#/populacoes">Voltar</a>`)}
+        <div class="info-box warn"><span>⚠</span><span>Esta execução de população não foi encontrada.</span></div>`;
+      return;
+    }
+
+    const population = S.state.populations.find((p) => p.id === popRun.populationId);
+    const snapshotPersonas = popRun.executionSnapshot?.personas || [];
+    const total = snapshotPersonas.length;
+    const runs = S.getReadingRunsForPopulationRun(popRun.id);
+    const runByPersona = new Map(runs.map((r) => [r.personaId, r]));
+    const completed = runs.filter((r) => r.status === "COMPLETED").length;
+    const failed = runs.filter((r) => r.status === "FAILED").length;
+    const pct = total ? Math.round(((completed + failed) / total) * 100) : 0;
+    const isRunning = popRun.status === "RUNNING" || popRun.status === "PENDING";
+
+    // Retoma automaticamente (uma única vez por montagem desta tela) uma
+    // execução presa em RUNNING sem loop ativo nesta aba — cobre o caso de
+    // a página ter sido recarregada no meio da execução.
+    if (popRun.status === "RUNNING" && !resumeAttempted && !isPopulationRunActive(popRun.id)) {
+      resumeAttempted = true;
+      resumePopulationRun(popRun.id).catch((err) => console.error("Falha ao retomar PopulationRun", err));
+    }
+
+    const finalPanel = popRun.status === "COMPLETED" ? `
+      <div class="info-box" style="margin-top:16px">
+        <span>✓</span>
+        <span>Todas as ${total} leitura(s) foram concluídas. <a href="#pr-persona-list">Ver resultados da população</a></span>
+      </div>`
+      : popRun.status === "PARTIAL" ? `
+      <div class="info-box warn" style="margin-top:16px">
+        <span>⚠</span>
+        <span>${completed} de ${total} leitores concluíram (${failed} falharam). <a href="#pr-persona-list">Ver resultados disponíveis</a></span>
+      </div>`
+      : popRun.status === "FAILED" ? `
+      <div class="info-box warn" style="margin-top:16px">
+        <span>✕</span>
+        <span>Nenhuma leitura pôde ser concluída.</span>
+      </div>`
+      : popRun.status === "CANCELLED" ? `
+      <div class="info-box warn" style="margin-top:16px">
+        <span>■</span>
+        <span>Execução cancelada. ${completed} de ${total} leitura(s) concluídas antes do cancelamento continuam disponíveis.</span>
+      </div>`
+      : "";
+
+    main.innerHTML = `
+      ${pageHead(
+        `Execução de população · ${esc(popRun.title || population?.name || "")}`,
+        `Population: <b>${esc(population?.name || "—")}</b>`,
+        `${isRunning ? `<button class="btn btn-danger" id="pr-cancel">Cancelar execução</button>` : ""}<a class="btn" href="#/populacoes">Voltar às populações</a>`
+      )}
+      <div class="card" style="margin-bottom:18px">
+        <div class="q-meta" style="margin-bottom:10px">${populationRunStatusBadge(popRun.status)}</div>
+        <p class="mono">${completed + failed} / ${total} leituras concluídas${failed ? ` · ${failed} falharam` : ""}</p>
+        <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+      </div>
+      ${finalPanel}
+      <div class="section-title" id="pr-persona-list">Personas</div>
+      <div class="pr-status-list">
+        ${snapshotPersonas.map((persona) => {
+          const run = runByPersona.get(persona.id);
+          const status = run ? run.status : "PENDING";
+          const meta = RUN_STATE_META[status] || RUN_STATE_META.PENDING;
+          return `
+          <div class="pr-status-item">
+            <div class="pr-status-main">
+              <span class="pr-status-icon ${meta.cls}">${meta.icon}</span>
+              <span>${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}</span>
+            </div>
+            <div class="pr-status-side">
+              <span class="badge ${meta.cls}">${meta.label}</span>
+              ${status === "COMPLETED" ? `<a class="btn btn-sm" href="#/execucoes/${run.id}">Ver resultado</a>` : ""}
+              ${status === "FAILED" ? `<button type="button" class="btn btn-sm btn-ghost" data-toggle-err="${run.id}">Ver erro</button>` : ""}
+            </div>
+          </div>
+          ${status === "FAILED" ? `<div class="pr-error-msg" id="err-${run.id}" hidden>${esc(run.errorMessage || "Falha desconhecida.")}</div>` : ""}`;
+        }).join("")}
+      </div>`;
+
+    $("#pr-cancel")?.addEventListener("click", async () => {
+      if (!confirm("Cancelar esta execução de população? Leituras já concluídas não serão apagadas.")) return;
+      await cancelPopulationRun(popRun.id);
+      toast("Execução de população cancelada.", "ok");
+      render();
+    });
+    $$("[data-toggle-err]", main).forEach((b) => b.addEventListener("click", () => {
+      const box = document.getElementById("err-" + b.dataset.toggleErr);
+      if (box) box.hidden = !box.hidden;
+    }));
+
+    if (["COMPLETED", "FAILED", "CANCELLED"].includes(popRun.status) && activePoll) {
+      clearInterval(activePoll);
+      activePoll = null;
+    }
+  };
+
+  render();
+  activePoll = setInterval(render, 900);
 }
 
 // ================================================================== TAGS
