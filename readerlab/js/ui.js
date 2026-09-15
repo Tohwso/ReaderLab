@@ -1324,9 +1324,28 @@ const HUB_TABS = [
   ["resumo", "Resumo"],
   ["heatmap", "Heatmap"],
   ["reacoes", "Reações"],
+  ["segmentos", "Segmentos"],
   ["perguntas", "Perguntas"],
   ["leitores", "Leitores"],
   ["dados", "Dados"],
+];
+
+// Operadores suportados pelos filtros de segmento — comparação simples e
+// determinística, sem clustering automático.
+const SEGMENT_RULE_OPS = {
+  "<": (a, b) => a < b,
+  "<=": (a, b) => a <= b,
+  ">": (a, b) => a > b,
+  ">=": (a, b) => a >= b,
+  "==": (a, b) => a === b,
+};
+
+// Presets iniciais referenciados por SLUG do atributo (nunca por ID) — só
+// aparecem se o atributo correspondente existir no catálogo atual.
+const BUILTIN_SEGMENT_PRESETS = [
+  { name: "Plot-driven", ruleDefs: [{ slug: "orientacao-a-enredo", op: ">=", value: 70 }] },
+  { name: "Character-driven", ruleDefs: [{ slug: "orientacao-a-personagens", op: ">=", value: 70 }] },
+  { name: "Ideas-driven", ruleDefs: [{ slug: "orientacao-a-ideias", op: ">=", value: 70 }] },
 ];
 
 function populationRunBundle(popRun) {
@@ -1356,10 +1375,53 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   let reactionsSort = { by: "freq", dir: "desc" };
   let reactionsShowZero = false;
   let openReactionCodes = new Set();
+  let segmentCompareMode = "vs-all"; // "vs-all" | "vs-segment"
+  let segmentARules = [];
+  let segmentBRules = [];
+  // Presets salvos nesta sessão (sem persistência — reinicia ao sair do hub).
+  let customPresets = [];
 
   // Link contextual para o relatório individual — preserva de onde veio
   // (esta PopulationRun + aba atual) para o botão "Voltar" funcionar.
   const runReportLink = (runId) => `#/execucoes/${runId}?from=population-runs/${popRun.id}&tab=${encodeURIComponent(activeTab)}`;
+
+  // Atributos elegíveis para regras de segmento: só os que ao menos uma
+  // Persona desta execução tem explicitamente configurados.
+  const ruleAttributeOptions = () => {
+    const ids = new Set();
+    snapshotPersonas.forEach((p) => Object.keys(p.attributeValues || {}).forEach((id) => ids.add(id)));
+    return [...ids]
+      .map((id) => S.state.attributes.find((a) => a.id === id))
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  };
+
+  // Resolve os slugs de um preset contra o catálogo atual de atributos —
+  // preset só fica disponível se TODOS os atributos referenciados existirem.
+  const resolvePresetRules = (ruleDefs) => {
+    const rules = ruleDefs.map((rd) => {
+      const attribute = S.state.attributes.find((a) => a.slug === rd.slug);
+      return attribute ? { attributeId: attribute.id, op: rd.op, value: rd.value } : null;
+    });
+    return rules.every(Boolean) ? rules : null;
+  };
+
+  const availablePresets = () => [
+    ...BUILTIN_SEGMENT_PRESETS.map((p) => ({ name: p.name, rules: resolvePresetRules(p.ruleDefs) })).filter((p) => p.rules),
+    ...customPresets,
+  ];
+
+  // Persona sem valor EXPLÍCITO para um atributo da regra nunca entra no
+  // segmento — nunca tratamos ausência como o valor default (ex.: 50).
+  const personaMatchesRules = (persona, rules) => rules.every((r) => {
+    const v = persona.attributeValues ? persona.attributeValues[r.attributeId] : undefined;
+    if (v == null || typeof v !== "number" || !r.attributeId || r.value === "" || r.value == null) return false;
+    const cmp = SEGMENT_RULE_OPS[r.op];
+    return cmp ? cmp(v, Number(r.value)) : false;
+  });
+
+  const segmentPersonas = (rules) => (rules.length ? snapshotPersonas.filter((p) => personaMatchesRules(p, rules)) : snapshotPersonas);
+  const runsForPersonas = (personaList) => runs.filter((r) => personaList.some((p) => p.id === r.personaId));
 
   // Colunas dinâmicas: perguntas quantitativas (scale/number) da Survey
   // congelada no snapshot — nunca por nome fixo.
@@ -1369,8 +1431,10 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   // e Índice de Divergência) — só sobre respostas válidas dos leitores que
   // concluíram a leitura; ausência de resposta nunca vira zero. Guarda quem
   // deu o maior/menor valor para permitir navegar até o leitor de origem.
-  const questionStats = () => heatmapQuestions.map((q) => {
-    const entries = runs
+  // Aceita um subconjunto de ReadingRuns (usado pela aba Segmentos); por
+  // padrão considera todos os leitores desta PopulationRun.
+  const questionStats = (runsSubset = runs) => heatmapQuestions.map((q) => {
+    const entries = runsSubset
       .filter((r) => r.status === "COMPLETED")
       .map((r) => {
         const ans = S.getResultForRun(r.id)?.surveyAnswers.find((a) => a.questionId === q.id);
@@ -1529,10 +1593,12 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   };
 
   // Só agrega reaction_code presentes no snapshot desta execução — reações
-  // criadas/renomeadas depois não contaminam o histórico.
-  const computeReactionStats = () => {
+  // criadas/renomeadas depois não contaminam o histórico. Aceita um
+  // subconjunto de ReadingRuns (usado pela aba Segmentos); por padrão
+  // considera todos os leitores desta PopulationRun.
+  const computeReactionStats = (runsSubset = runs) => {
     const snapshotReactions = popRun.executionSnapshot?.reactions || [];
-    const validEntries = runs
+    const validEntries = runsSubset
       .filter((r) => r.status === "COMPLETED")
       .map((r) => ({ run: r, result: S.getResultForRun(r.id) }))
       .filter((x) => x.result);
@@ -1640,6 +1706,172 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
           </div>`}`;
   };
 
+  // ---------------------------------------------------------- Segmentos
+  // Um "grupo" (A ou B) é combinado com AND — sem clustering automático,
+  // apenas filtros determinísticos sobre atributos já existentes.
+  const renderRuleRow = (group, rule, idx) => {
+    const options = ruleAttributeOptions();
+    return `
+      <div class="rule-row">
+        <select data-rule-field="attributeId" data-rule-group="${group}" data-rule-idx="${idx}">
+          <option value="">Selecione um atributo…</option>
+          ${options.map((a) => `<option value="${a.id}" ${rule.attributeId === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+        </select>
+        <select data-rule-field="op" data-rule-group="${group}" data-rule-idx="${idx}">
+          ${Object.keys(SEGMENT_RULE_OPS).map((op) => `<option value="${op}" ${rule.op === op ? "selected" : ""}>${op}</option>`).join("")}
+        </select>
+        <input type="number" data-rule-field="value" data-rule-group="${group}" data-rule-idx="${idx}" value="${rule.value ?? ""}" placeholder="valor">
+        <button type="button" class="btn btn-sm btn-ghost btn-danger" data-rule-remove="${group}" data-rule-idx="${idx}">Remover</button>
+      </div>`;
+  };
+
+  const renderRuleBuilder = (group, rules, title) => {
+    const eligible = segmentPersonas(rules);
+    return `
+      <div class="rule-builder">
+        <div class="rule-builder-head">
+          <b>${esc(title)}</b>
+          <span class="badge neutral">N = ${eligible.length}</span>
+        </div>
+        ${rules.length === 0 ? `<p class="faint small">Sem filtros — considera todos os leitores desta execução.</p>` : ""}
+        ${rules.map((r, i) => `${i > 0 ? `<div class="rule-and">E</div>` : ""}${renderRuleRow(group, r, i)}`).join("")}
+        <div class="rule-builder-actions">
+          <button type="button" class="btn btn-sm" data-rule-add="${group}">+ Adicionar regra</button>
+          ${rules.length ? `<button type="button" class="btn btn-sm btn-ghost" data-rule-clear="${group}">Limpar regras</button>` : ""}
+        </div>
+      </div>`;
+  };
+
+  const renderPresetsRow = () => {
+    const presets = availablePresets();
+    return `
+      <div class="preset-row">
+        <span class="hint">Presets (Segmento${segmentCompareMode === "vs-segment" ? " A" : ""}):</span>
+        ${presets.length === 0
+          ? `<span class="faint small">Nenhum preset disponível para o catálogo de atributos atual.</span>`
+          : presets.map((p, i) => `<button type="button" class="btn btn-sm btn-ghost preset-chip" data-preset-apply="${i}">${esc(p.name)}</button>`).join("")}
+        ${segmentARules.length ? `<button type="button" class="btn btn-sm btn-ghost" data-preset-save>Salvar Segmento${segmentCompareMode === "vs-segment" ? " A" : ""} como preset</button>` : ""}
+      </div>`;
+  };
+
+  // Uma "coluna" de comparação: leitores elegíveis + estatísticas por
+  // pergunta e por reação, recalculadas apenas sobre esse subconjunto.
+  const buildSegmentColumn = (label, rules) => {
+    const personas = segmentPersonas(rules);
+    const runsSubset = runsForPersonas(personas);
+    return { label, personas, runsSubset, questionStats: questionStats(runsSubset), reactionStats: computeReactionStats(runsSubset) };
+  };
+
+  const renderQuestionComparisonTable = (columns) => `
+    <div class="table-wrap" style="margin-bottom:18px">
+      <table>
+        <thead><tr>
+          <th>Pergunta</th>
+          ${columns.map((c) => `<th>${esc(c.label)}<br><span class="faint small mono">N = ${c.personas.length}</span></th>`).join("")}
+        </tr></thead>
+        <tbody>
+          ${heatmapQuestions.map((q, qi) => `
+            <tr>
+              <td>${esc(q.text)}</td>
+              ${columns.map((c) => {
+                const s = c.questionStats[qi].stats;
+                if (s.n === 0) return `<td class="faint small">sem dados</td>`;
+                return `<td>
+                  <div class="mono">${Math.round(s.mean)}</div>
+                  <div class="faint small">${s.divergence != null ? Math.round(s.divergence * 100) + "% div." : "—"} · n=${s.n}</div>
+                </td>`;
+              }).join("")}
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+
+  const renderReactionComparisonTable = (columns) => {
+    const snapshotReactions = popRun.executionSnapshot?.reactions || [];
+    if (!snapshotReactions.length) return `<p class="faint small">Esta execução não tinha reações configuradas.</p>`;
+    return `
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Reação</th>
+            ${columns.map((c) => `<th>${esc(c.label)}</th>`).join("")}
+          </tr></thead>
+          <tbody>
+            ${snapshotReactions.map((def) => `
+              <tr>
+                <td><span class="reaction-dot" style="background:${esc(def.color)}"></span> ${esc(def.name)}</td>
+                ${columns.map((c) => {
+                  const s = c.reactionStats.stats.find((x) => x.def.code === def.code);
+                  if (!s || !c.reactionStats.validCount) return `<td class="faint small">—</td>`;
+                  return `<td><div class="mono">${s.pct}%</div><div class="faint small">${s.count}/${c.reactionStats.validCount}${s.avg != null ? ` · int. ${s.avg}` : ""}</div></td>`;
+                }).join("")}
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+  };
+
+  // Opcional: ranking simples (não é clustering) dos leitores cujas
+  // respostas quantitativas mais se afastam, em média, da média do grupo.
+  const renderOutliers = () => {
+    const stats = questionStats(runs).filter((qs) => qs.stats.n >= 2 && qs.stats.divergence != null);
+    if (!stats.length) return "";
+    const scores = new Map();
+    stats.forEach(({ question, stats: s }) => {
+      const range = (question.max ?? 100) - (question.min ?? 0) || 1;
+      runs.filter((r) => r.status === "COMPLETED").forEach((r) => {
+        const ans = S.getResultForRun(r.id)?.surveyAnswers.find((a) => a.questionId === question.id);
+        if (!ans || typeof ans.value !== "number") return;
+        const dist = Math.abs(ans.value - s.mean) / range;
+        const entry = scores.get(r.personaId) || { sum: 0, count: 0, run: r };
+        entry.sum += dist; entry.count += 1;
+        scores.set(r.personaId, entry);
+      });
+    });
+    const list = [...scores.entries()]
+      .map(([personaId, e]) => ({ persona: snapshotPersonas.find((p) => p.id === personaId), run: e.run, avgDistance: e.sum / e.count }))
+      .filter((x) => x.persona)
+      .sort((a, b) => b.avgDistance - a.avgDistance)
+      .slice(0, 5);
+    if (!list.length) return "";
+    return `
+      <details class="card" style="margin-top:18px">
+        <summary style="cursor:pointer;font-weight:650">Leitores mais distantes da média (todos os leitores)</summary>
+        <p class="faint small" style="margin-top:8px">Distância normalizada média entre a resposta do leitor e a média do grupo, por pergunta quantitativa. Ranking simples — não é clustering.</p>
+        <div class="pr-status-list" style="margin-top:8px">
+          ${list.map(({ persona, run, avgDistance }) => `
+            <div class="pr-status-item">
+              <div class="pr-status-main">${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}</div>
+              <div class="pr-status-side">
+                <span class="mono small">${Math.round(avgDistance * 100)}% dist.</span>
+                <a class="btn btn-sm" href="${runReportLink(run.id)}">Ver relatório</a>
+              </div>
+            </div>`).join("")}
+        </div>
+      </details>`;
+  };
+
+  const renderSegmentosTab = () => {
+    const columns = segmentCompareMode === "vs-all"
+      ? [buildSegmentColumn("Todos os leitores", []), buildSegmentColumn("Segmento", segmentARules)]
+      : [buildSegmentColumn("Segmento A", segmentARules), buildSegmentColumn("Segmento B", segmentBRules)];
+    return `
+      <div class="card" style="margin-bottom:16px">
+        <div class="toolbar" style="margin-bottom:12px">
+          <label class="radio-row"><input type="radio" name="seg-mode" value="vs-all" ${segmentCompareMode === "vs-all" ? "checked" : ""}> Todos vs Segmento</label>
+          <label class="radio-row"><input type="radio" name="seg-mode" value="vs-segment" ${segmentCompareMode === "vs-segment" ? "checked" : ""}> Segmento A vs Segmento B</label>
+        </div>
+        ${renderPresetsRow()}
+        ${renderRuleBuilder("A", segmentARules, segmentCompareMode === "vs-all" ? "Segmento" : "Segmento A")}
+        ${segmentCompareMode === "vs-segment" ? renderRuleBuilder("B", segmentBRules, "Segmento B") : ""}
+      </div>
+      <div class="section-title">Perguntas quantitativas</div>
+      ${heatmapQuestions.length ? renderQuestionComparisonTable(columns) : `<p class="faint small">Esta Survey não possui perguntas quantitativas.</p>`}
+      <div class="section-title">Reações</div>
+      ${renderReactionComparisonTable(columns)}
+      ${renderOutliers()}`;
+  };
+
   const renderTabContent = () => {
     if (activeTab === "resumo") {
       return `
@@ -1657,6 +1889,7 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
     }
     if (activeTab === "heatmap") return renderHeatmapTab();
     if (activeTab === "reacoes") return renderReacoesTab();
+    if (activeTab === "segmentos") return renderSegmentosTab();
     if (activeTab === "leitores") {
       return `
         <div class="pr-status-list">
@@ -1775,6 +2008,47 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
         else openReactionCodes.add(code);
         renderAll();
       }));
+    }
+
+    if (activeTab === "segmentos") {
+      $$('input[name="seg-mode"]', main).forEach((r) => r.addEventListener("change", (e) => {
+        segmentCompareMode = e.target.value;
+        renderAll();
+      }));
+      $$("[data-rule-field]", main).forEach((el) => el.addEventListener("change", (e) => {
+        const { ruleField, ruleGroup, ruleIdx } = e.target.dataset;
+        const list = ruleGroup === "A" ? segmentARules : segmentBRules;
+        const rule = list[Number(ruleIdx)];
+        if (!rule) return;
+        rule[ruleField] = e.target.value;
+        renderAll();
+      }));
+      $$("[data-rule-add]", main).forEach((b) => b.addEventListener("click", () => {
+        const list = b.dataset.ruleAdd === "A" ? segmentARules : segmentBRules;
+        list.push({ attributeId: "", op: "<", value: "" });
+        renderAll();
+      }));
+      $$("[data-rule-remove]", main).forEach((b) => b.addEventListener("click", () => {
+        const list = b.dataset.ruleRemove === "A" ? segmentARules : segmentBRules;
+        list.splice(Number(b.dataset.ruleIdx), 1);
+        renderAll();
+      }));
+      $$("[data-rule-clear]", main).forEach((b) => b.addEventListener("click", () => {
+        if (b.dataset.ruleClear === "A") segmentARules = []; else segmentBRules = [];
+        renderAll();
+      }));
+      $$("[data-preset-apply]", main).forEach((b) => b.addEventListener("click", () => {
+        const preset = availablePresets()[Number(b.dataset.presetApply)];
+        if (preset) segmentARules = preset.rules.map((r) => ({ ...r }));
+        renderAll();
+      }));
+      main.querySelector("[data-preset-save]")?.addEventListener("click", () => {
+        const name = prompt("Nome do preset:");
+        if (!name) return;
+        customPresets.push({ name, rules: segmentARules.map((r) => ({ ...r })) });
+        toast("Preset salvo nesta sessão (não persistido).", "ok");
+        renderAll();
+      });
     }
   };
 

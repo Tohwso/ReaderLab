@@ -322,7 +322,20 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .qstat-outlier { font-size: 11px; text-align: right; margin: -3px 0 3px; }
 .heatmap-persona-link { margin-left: 8px; font-size: 11px; }
 .checkbox-row input { width: auto; }
+.radio-row { display: flex; align-items: center; gap: 7px; padding: 7px 10px; border-radius: 7px; }
+.radio-row:hover { background: var(--bg-3); }
+.radio-row input { width: auto; }
 .pop-members { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* ============ Segmentos (PopulationRun) ============ */
+.rule-builder { border: 1px solid var(--line-soft); border-radius: 9px; padding: 12px; margin-top: 10px; }
+.rule-builder-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.rule-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.rule-row select, .rule-row input[type="number"] { width: auto; min-width: 120px; }
+.rule-and { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; margin: 2px 0 6px 2px; }
+.rule-builder-actions { display: flex; gap: 8px; margin-top: 6px; }
+.preset-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.preset-chip { border-style: dashed; }
 
 /* ============ Relatório de leitura (ReadingRun/ReadingResult) ============ */
 .run-report-header { display: flex; flex-direction: column; gap: 14px; margin-bottom: 18px; }
