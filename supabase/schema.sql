@@ -120,6 +120,7 @@ create table if not exists runs (
   persona_id text generated always as (data->>'personaId') stored,
   survey_id text generated always as (data->>'surveyId') stored,
   status text generated always as (data->>'status') stored,
+  population_run_id text generated always as (data->>'populationRunId') stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -127,6 +128,27 @@ create index if not exists runs_owner_idx on runs (owner_id);
 create index if not exists runs_persona_idx on runs (persona_id);
 create index if not exists runs_survey_idx on runs (survey_id);
 create index if not exists runs_status_idx on runs (status);
+create index if not exists runs_population_run_idx on runs (population_run_id);
+
+-- ------------------------------------------------------- population_runs
+-- Orquestra N ReadingRuns (uma por Persona de uma Population) sobre o
+-- mesmo texto/Survey/config de modelo. Vínculo é feito pelo lado de
+-- `runs` (runs.population_run_id) — apagar uma population_run NÃO apaga
+-- as ReadingRuns já geradas por ela (mesmo padrão de referência solta já
+-- usado no restante do schema).
+create table if not exists population_runs (
+  id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  data jsonb not null default '{}'::jsonb,
+  population_id text generated always as (data->>'populationId') stored,
+  survey_id text generated always as (data->>'surveyId') stored,
+  status text generated always as (data->>'status') stored,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists population_runs_owner_idx on population_runs (owner_id);
+create index if not exists population_runs_population_idx on population_runs (population_id);
+create index if not exists population_runs_status_idx on population_runs (status);
 
 -- --------------------------------------------------------------- results
 create table if not exists results (
@@ -155,7 +177,7 @@ create table if not exists meta (
 do $$
 declare t text;
 begin
-  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','meta'])
+  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','population_runs','meta'])
   loop
     execute format('drop trigger if exists trg_%1$s_updated_at on %1$s;', t);
     execute format('create trigger trg_%1$s_updated_at before update on %1$s for each row execute function set_updated_at();', t);
@@ -171,7 +193,7 @@ end $$;
 do $$
 declare t text;
 begin
-  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','meta'])
+  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','population_runs','meta'])
   loop
     execute format('alter table %1$s enable row level security;', t);
     execute format('drop policy if exists %1$s_rw on %1$s;', t);

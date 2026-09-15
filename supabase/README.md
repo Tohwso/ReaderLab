@@ -24,13 +24,18 @@ Security (RLS) no Postgres.
 - **Projeto novo (banco vazio):** abra **SQL Editor** no dashboard, cole o
   conteúdo de [`schema.sql`](./schema.sql) e execute. Isso cria as tabelas
   `personas`, `attributes`, `reactions`, `surveys`, `tags`, `populations`,
-  `runs`, `results`, `meta` (uma por "store" do frontend), cada uma com uma
-  coluna `owner_id` e RLS exigindo `owner_id = auth.uid()` em toda
-  operação (select/insert/update/delete).
+  `runs`, `results`, `population_runs`, `meta` (uma por "store" do
+  frontend), cada uma com uma coluna `owner_id` e RLS exigindo
+  `owner_id = auth.uid()` em toda operação (select/insert/update/delete).
 - **Projeto já existente** (rodando o schema antigo, anônimo/compartilhado):
   **não** rode `schema.sql` de novo — use a migration não-destrutiva em
   [`migrations/0001_owner_id_and_auth.sql`](./migrations/0001_owner_id_and_auth.sql).
   Ver seção 3 abaixo.
+- **Projeto já em uso que ainda não tem PopulationRun** (já rodou a
+  0001): aplique também
+  [`migrations/0002_population_runs.sql`](./migrations/0002_population_runs.sql)
+  — cria a tabela `population_runs` e a coluna gerada
+  `runs.population_run_id`, sem tocar em nenhum dado existente.
 
 Alternativa via CLI:
 ```

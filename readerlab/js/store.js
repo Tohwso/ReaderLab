@@ -11,6 +11,7 @@ export const state = {
   populations: [],
   runs: [],
   results: [],
+  populationRuns: [],
   ready: false,
 };
 
@@ -27,6 +28,7 @@ export function resetState() {
   state.populations = [];
   state.runs = [];
   state.results = [];
+  state.populationRuns = [];
   state.ready = false;
 }
 
@@ -38,13 +40,14 @@ function sortAll() {
 }
 
 export async function loadAll() {
-  const [personas, attributes, reactions, surveys, tags, populations, runs, results] = await Promise.all([
+  const [personas, attributes, reactions, surveys, tags, populations, runs, results, populationRuns] = await Promise.all([
     db.getAll("personas"), db.getAll("attributes"), db.getAll("reactions"),
     db.getAll("surveys"), db.getAll("tags"), db.getAll("populations"),
-    db.getAll("runs"), db.getAll("results"),
+    db.getAll("runs"), db.getAll("results"), db.getAll("populationRuns"),
   ]);
-  Object.assign(state, { personas, attributes, reactions, surveys, tags, populations, runs, results, ready: true });
+  Object.assign(state, { personas, attributes, reactions, surveys, tags, populations, runs, results, populationRuns, ready: true });
   state.runs.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  state.populationRuns.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   sortAll();
 }
 
@@ -255,6 +258,18 @@ export async function saveResult(result) {
 export const getResultForRun = (runId) =>
   state.results.find((r) => r.readingRunId === runId) || null;
 
+// -------------------------------------------------------- Execuções de população
+export async function savePopulationRun(popRun) {
+  await db.put("populationRuns", popRun);
+  const i = state.populationRuns.findIndex((x) => x.id === popRun.id);
+  if (i >= 0) state.populationRuns[i] = popRun; else state.populationRuns.unshift(popRun);
+  state.populationRuns.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  return popRun;
+}
+
+export const getReadingRunsForPopulationRun = (populationRunId) =>
+  state.runs.filter((r) => r.populationRunId === populationRunId);
+
 // ---------------------------------------------------- Importação / Exportação
 export function exportAll() {
   return {
@@ -270,6 +285,7 @@ export function exportAll() {
       populations: state.populations,
       runs: state.runs,
       results: state.results,
+      populationRuns: state.populationRuns,
     },
   };
 }
@@ -288,6 +304,7 @@ export async function importAll(payload) {
   await db.bulkPut("populations", d.populations || []);
   await db.bulkPut("runs", d.runs || []);
   await db.bulkPut("results", d.results || []);
+  await db.bulkPut("populationRuns", d.populationRuns || []);
   await db.metaSet("seeded", true);
   await loadAll();
 }

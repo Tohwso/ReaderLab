@@ -18,7 +18,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 
-export const STORES = ["personas", "attributes", "reactions", "surveys", "tags", "populations", "runs", "results"];
+export const STORES = ["personas", "attributes", "reactions", "surveys", "tags", "populations", "runs", "results", "populationRuns"];
+
+// Nomes de store (camelCase, usados no JS) que divergem do nome real da
+// tabela Postgres (snake_case) — hoje só populationRuns/population_runs.
+const TABLE_NAMES = { populationRuns: "population_runs" };
 
 // "connecting" | "supabase" | "offline" — usado pela UI para avisos de estado
 // de CONEXÃO (não de autenticação — ver isAuthenticated()/onAuthChange()).
@@ -125,7 +129,7 @@ export async function signOut() {
 
 function table(store) {
   if (!client) throw new Error("Banco de dados não inicializado — chame openDB() antes.");
-  return client.from(store);
+  return client.from(TABLE_NAMES[store] || store);
 }
 
 const rowToObject = (row) => ({ ...row.data, id: row.id });

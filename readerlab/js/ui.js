@@ -2,11 +2,9 @@
 import * as S from "./store.js";
 import * as D from "./domain.js";
 import { persistenceMode, signOut } from "./db.js";
-import { getLLMConfig, getProvider, ProviderError, providerErrorMessage } from "./llm/provider.js";
-import { buildReadingPrompt } from "./llm/promptBuilder.js";
-import { validateLLMResponse } from "./llm/validate.js";
-import { DemoProvider } from "./llm/demoProvider.js";
+import { getLLMConfig } from "./llm/provider.js";
 import { renderRunResultView } from "./components/runResultView.js";
+import { executeReadingRun, executePopulationRun } from "./engine.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -191,7 +189,9 @@ export function renderRoute() {
     case "execucoes":
       if (param === "nova") return viewNewRun(main);
       return param ? viewRunDetail(main, param) : viewRuns(main);
-    case "populacoes": return viewPopulations(main);
+    case "populacoes":
+      if (param && parts[2] === "executar") return viewExecutePopulation(main, param);
+      return viewPopulations(main);
     case "tags": return viewTags(main);
     case "dados": return viewData(main);
     default: return viewDashboard(main);
@@ -1018,12 +1018,14 @@ function viewPopulations(main) {
             ${pop.personaIds.length > 8 ? `<span class="tag">+${pop.personaIds.length - 8}</span>` : ""}
           </div>
           <div class="card-actions">
+            <button class="btn btn-sm btn-primary" data-exec="${pop.id}" ${pop.personaIds.length ? "" : "disabled"}>Executar população</button>
             <button class="btn btn-sm" data-members="${pop.id}">Editar membros</button>
             <button class="btn btn-sm btn-ghost" data-rename="${pop.id}">Renomear</button>
             <button class="btn btn-sm btn-ghost btn-danger" data-del="${pop.id}">Excluir</button>
           </div>
         </div>`).join("")}</div>`}`;
   $("#po-new").addEventListener("click", () => populationModal());
+  $$("[data-exec]", main).forEach((b) => b.addEventListener("click", () => { location.hash = "#/populacoes/" + b.dataset.exec + "/executar"; }));
   $$("[data-members]", main).forEach((b) => b.addEventListener("click", () =>
     membersModal(S.state.populations.find((p) => p.id === b.dataset.members))));
   $$("[data-rename]", main).forEach((b) => b.addEventListener("click", () =>
@@ -1036,6 +1038,173 @@ function viewPopulations(main) {
       renderRoute();
     }
   }));
+}
+
+function progressBadge(status) {
+  const cls = { aguardando: "neutral", executando: "accent", concluída: "ok", falhou: "bad" }[status] || "neutral";
+  return `<span class="badge ${cls}">${esc(status)}</span>`;
+}
+
+function viewExecutePopulation(main, popId) {
+  const pop = S.state.populations.find((p) => p.id === popId);
+  if (!pop) { location.hash = "#/populacoes"; return; }
+  const members = pop.personaIds.map((id) => S.state.personas.find((p) => p.id === id)).filter(Boolean);
+  const cfg = getLLMConfig();
+  const surveys = S.state.surveys.filter((s) => s.status === "ativa");
+
+  if (!members.length) {
+    main.innerHTML = `${pageHead("Executar população", "", `<a class="btn" href="#/populacoes">Voltar</a>`)}
+      <div class="info-box warn"><span>⚠</span><span>Esta população não tem personas membros. Edite os membros antes de executar.</span></div>`;
+    return;
+  }
+  if (!surveys.length) {
+    main.innerHTML = `${pageHead("Executar população", "", `<a class="btn" href="#/populacoes">Voltar</a>`)}
+      <div class="info-box warn"><span>⚠</span><span>É necessária ao menos uma <b>pesquisa ativa</b> para executar uma população.</span></div>`;
+    return;
+  }
+
+  main.innerHTML = `
+    ${pageHead(`Executar população · ${esc(pop.name)}`, "Uma PopulationRun cria uma ReadingRun independente por Persona — mesmo texto, mesma Pesquisa, mesma configuração de modelo. As personas não compartilham respostas nem contexto entre si.",
+      `<a class="btn" href="#/populacoes">Voltar</a>`)}
+    ${!cfg.endpoint ? `
+    <div class="info-box warn" style="margin-bottom:16px"><span>⚠</span>
+      <span><b>Backend LLM não configurado.</b> Use o modo demo local ou conecte um proxy seguro para executar leituras reais.</span>
+    </div>` : ""}
+    <form id="pr-form" novalidate>
+      <div class="field" style="max-width:520px">
+        <label>Título da execução <span class="hint">(opcional)</span></label>
+        <input type="text" id="pr-title" placeholder="Capítulo 1 — leitura em população">
+      </div>
+
+      <div class="section-title">Texto</div>
+      <div class="field">
+        <label>Cole o texto ou envie um arquivo (.txt / .md)</label>
+        <textarea id="pr-text" class="tall" placeholder="Cole aqui o texto a ser lido por todas as personas desta população…"></textarea>
+        <div class="toolbar" style="margin:6px 0 0">
+          <input type="file" id="pr-file" accept=".txt,.md">
+          <span class="hint" id="pr-count">0 caracteres</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Pesquisa <span class="req">*</span></label>
+        <select id="pr-survey">
+          <option value="">Selecione…</option>
+          ${surveys.map((s) => `<option value="${s.id}">${esc(s.name)} (${D.SURVEY_KINDS[s.kind]})</option>`).join("")}
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Modo de execução</label>
+        <label class="checkbox-row" style="padding-left:0">
+          <input type="radio" name="pr-mode" value="demo" checked> Demo local (simulador — sem rede, resultados determinísticos)
+        </label>
+        <label class="checkbox-row" style="padding-left:0">
+          <input type="radio" name="pr-mode" value="llm" ${cfg.endpoint ? "" : "disabled"}>
+          LLM real via proxy ${cfg.endpoint ? "" : "(indisponível — nenhum backend configurado)"}
+        </label>
+      </div>
+
+      <div class="section-title">Resumo</div>
+      <div class="card" style="margin-bottom:16px">
+        <p><b>${members.length}</b> persona(s) serão executadas, sequencialmente e de forma isolada entre si.</p>
+        <div class="tags" style="margin-top:10px">
+          ${members.map((p) => `<span class="tag">${esc(p.code ? p.code + " — " : "")}${esc(p.name)}</span>`).join(" ")}
+        </div>
+        <p class="hint" style="margin-top:10px">Provider/model: <span class="mono">${esc(cfg.provider)} / ${esc(cfg.model)}</span> · Prompt version: <span class="mono">${esc(cfg.promptVersion)}</span></p>
+      </div>
+
+      <div class="save-bar">
+        <a class="btn" href="#/populacoes">Cancelar</a>
+        <button type="submit" class="btn btn-primary" id="pr-execute">Executar ${members.length} leitura(s)</button>
+      </div>
+    </form>
+    <div id="pr-progress"></div>`;
+
+  const textEl = $("#pr-text");
+  textEl.addEventListener("input", () => { $("#pr-count").textContent = `${textEl.value.length} caracteres`; });
+  $("#pr-file").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!/\.(txt|md)$/i.test(file.name)) { toast("Formato não suportado nesta fase. Use .txt ou .md.", "bad"); e.target.value = ""; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      textEl.value = String(reader.result || "");
+      textEl.dispatchEvent(new Event("input", { bubbles: true }));
+      toast(`Arquivo "${file.name}" carregado — revise o conteúdo antes de executar.`, "ok");
+    };
+    reader.readAsText(file);
+  });
+
+  let executing = false;
+  const form = $("#pr-form");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (executing) return;
+    const survey = surveys.find((x) => x.id === $("#pr-survey").value);
+    const text = textEl.value.trim();
+    if (!survey) { toast("Selecione uma pesquisa.", "bad"); return; }
+    if (text.length < 10) { toast("Forneça um texto para leitura (mínimo de algumas linhas).", "bad"); textEl.focus(); return; }
+
+    executing = true;
+    const btn = $("#pr-execute");
+    btn.disabled = true;
+    btn.textContent = "Executando…";
+
+    const liveCfg = getLLMConfig();
+    const mode = form.querySelector('input[name="pr-mode"]:checked')?.value || "demo";
+    const isDemo = mode === "demo";
+
+    const popRun = D.blankPopulationRun();
+    popRun.populationId = pop.id;
+    popRun.title = $("#pr-title").value.trim();
+    popRun.inputText = text;
+    popRun.surveyId = survey.id;
+    popRun.provider = isDemo ? "demo-local" : liveCfg.provider;
+    popRun.model = isDemo ? "simulador-v1" : "";
+    popRun.promptVersion = liveCfg.promptVersion;
+    await S.savePopulationRun(popRun);
+
+    const progressEl = $("#pr-progress");
+    const rows = new Map(); // personaId -> { persona, status, run }
+    members.forEach((p) => rows.set(p.id, { persona: p, status: "aguardando" }));
+    const renderProgress = () => {
+      progressEl.innerHTML = `
+        <div class="section-title">Progresso</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Persona</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${[...rows.values()].map((r) => `
+              <tr>
+                <td>${esc(r.persona.code ? r.persona.code + " — " : "")}${esc(r.persona.name)}</td>
+                <td>${progressBadge(r.status)}</td>
+                <td>${r.run ? `<a class="btn btn-sm" href="#/execucoes/${r.run.id}">Ver resultado</a>` : ""}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table></div>`;
+    };
+    renderProgress();
+
+    await executePopulationRun(popRun, {
+      population: pop, personas: members, survey, mode, liveCfg,
+      onProgress: ({ phase, persona, run, ok }) => {
+        const row = rows.get(persona.id);
+        if (!row) return;
+        row.run = run;
+        row.status = phase === "start" ? "executando" : (ok ? "concluída" : "falhou");
+        renderProgress();
+      },
+    });
+
+    btn.textContent = "Concluído";
+    toast(
+      popRun.status === "COMPLETED" ? "Execução de população concluída." :
+      popRun.status === "PARTIAL" ? "Execução concluída com falhas parciais — veja o progresso abaixo." :
+      "Todas as leituras desta população falharam.",
+      popRun.status === "FAILED" ? "bad" : "ok"
+    );
+    executing = false;
+  });
 }
 
 // ================================================================== TAGS
@@ -1329,62 +1498,10 @@ function viewNewRun(main) {
     run.promptVersion = liveCfg.promptVersion;
     await S.saveRun(run);
 
-    run.status = "RUNNING";
-    run.startedAt = D.nowISO();
-    await S.saveRun(run);
-
-    try {
-      const activeReactions = S.state.reactions.filter((r) => r.status === "ativa");
-      const { system, user } = buildReadingPrompt({
-        persona, attributes: S.state.attributes, reactions: activeReactions, survey, text,
-      });
-      // Snapshot criado ANTES de chamar a LLM: congela persona/atributos/survey/reações
-      // usados nesta execução, imunes a edições futuras dessas entidades.
-      run.executionSnapshot = D.buildExecutionSnapshot({
-        persona, attributes: S.state.attributes, survey, reactions: activeReactions,
-        provider: run.provider, model: run.model, promptVersion: run.promptVersion,
-      });
-      run.requestMetadata = {
-        promptChars: system.length + user.length,
-        reactionCount: activeReactions.length,
-        questionCount: survey.questions.length,
-        snapshotVersion: 1,
-      };
-      const provider = isDemo
-        ? new DemoProvider({ persona, attributes: S.state.attributes, reactions: activeReactions, survey })
-        : getProvider(liveCfg);
-      const { content, model } = await provider.complete({ systemPrompt: system, userPrompt: user });
-      run.rawResponse = content;
-      if (!isDemo && model) {
-        run.model = model;
-        run.executionSnapshot.llmConfig.model = model;
-      }
-
-      let parsed;
-      try {
-        parsed = JSON.parse(content);
-      } catch (_) {
-        throw new ProviderError("INVALID_JSON", "O modelo retornou um JSON inválido.");
-      }
-      const validation = validateLLMResponse(parsed, { reactions: activeReactions, survey });
-      if (!validation.ok) {
-        throw new ProviderError("INVALID_SCHEMA", "Resposta fora do schema: " + validation.errors.join(" | "));
-      }
-
-      run.status = "COMPLETED";
-      run.completedAt = D.nowISO();
-      await S.saveRun(run);
-      await S.saveResult({ ...D.blankResult(run.id), ...validation.value });
-      toast("Leitura concluída e resultado persistido.", "ok");
-      location.hash = "#/execucoes/" + run.id;
-    } catch (err) {
-      run.status = "FAILED";
-      run.completedAt = D.nowISO();
-      run.errorMessage = providerErrorMessage(err);
-      await S.saveRun(run);
-      toast(run.errorMessage, "bad");
-      location.hash = "#/execucoes/" + run.id;
-    }
+    const { ok } = await executeReadingRun(run, { persona, survey, mode, liveCfg });
+    if (ok) toast("Leitura concluída e resultado persistido.", "ok");
+    else toast(run.errorMessage, "bad");
+    location.hash = "#/execucoes/" + run.id;
   });
 }
 

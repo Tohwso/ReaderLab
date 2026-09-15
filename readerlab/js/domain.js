@@ -291,6 +291,53 @@ export function blankPopulation() {
   return { id: uid("pop"), name: "", description: "", personaIds: [], createdAt: t, updatedAt: t };
 }
 
+export const POPULATION_RUN_STATUS = {
+  PENDING: "Pendente",
+  RUNNING: "Executando",
+  COMPLETED: "Concluída",
+  PARTIAL: "Parcial",
+  FAILED: "Falhou",
+  CANCELLED: "Cancelada",
+};
+
+// Uma PopulationRun orquestra N ReadingRuns independentes (uma por Persona
+// da Population) — mesmo texto, mesma Survey, mesma configuração de
+// modelo. Ela NUNCA substitui o motor de ReadingRun: apenas agrupa suas
+// execuções via ReadingRun.populationRunId.
+export function blankPopulationRun() {
+  const t = nowISO();
+  return {
+    id: uid("poprun"),
+    populationId: "",
+    title: "",
+    inputText: "",
+    surveyId: "",
+    provider: "kimi",
+    model: "kimi-k3",
+    promptVersion: "v1",
+    status: "PENDING", // PENDING | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED
+    createdAt: t,
+    startedAt: null,
+    completedAt: null,
+    errorMessage: "",
+    executionSnapshot: null, // preenchido por buildPopulationExecutionSnapshot() antes de disparar as ReadingRuns
+  };
+}
+
+// Snapshot imutável da composição efetiva da PopulationRun — protege o
+// histórico contra alterações futuras da Population (membros podem mudar,
+// personas podem ser editadas/arquivadas) e de Survey/Reações.
+export function buildPopulationExecutionSnapshot({ population, personas, survey, reactions, provider, model, promptVersion }) {
+  return structuredClone({
+    version: 1,
+    population,
+    personas,
+    survey,
+    reactions,
+    llmConfig: { provider, model, promptVersion },
+  });
+}
+
 // ============================================ Personas de exemplo (seed)
 // Leitores sintéticos de exemplo: população deliberadamente heterogênea,
 // com contradições psicologicamente plausíveis. Mapeados exclusivamente por
@@ -580,6 +627,7 @@ export function blankRun() {
     rawResponse: "",
     requestMetadata: {},
     executionSnapshot: null, // preenchido por buildExecutionSnapshot() antes de chamar a LLM
+    populationRunId: null, // preenchido quando esta ReadingRun foi disparada por uma PopulationRun
   };
 }
 
