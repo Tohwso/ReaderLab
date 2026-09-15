@@ -270,6 +270,9 @@ export async function savePopulationRun(popRun) {
 export const getReadingRunsForPopulationRun = (populationRunId) =>
   state.runs.filter((r) => r.populationRunId === populationRunId);
 
+export const getPopulationRunsForPopulation = (populationId) =>
+  state.populationRuns.filter((p) => p.populationId === populationId);
+
 // ---------------------------------------------------- Importação / Exportação
 export function exportAll() {
   return {

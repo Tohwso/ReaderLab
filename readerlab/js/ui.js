@@ -15,6 +15,11 @@ const fmtDate = (iso) => {
   const d = new Date(iso);
   return d.toLocaleDateString("pt-BR") + " " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 };
+const fmtDuration = (a, b) => {
+  if (!a || !b) return "—";
+  const s = Math.round((new Date(b) - new Date(a)) / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}min ${s % 60}s`;
+};
 const options = (obj, selected) =>
   Object.entries(obj).map(([v, l]) => `<option value="${v}" ${v === selected ? "selected" : ""}>${l}</option>`).join("");
 
@@ -1012,7 +1017,9 @@ function viewPopulations(main) {
       `<button class="btn btn-primary" id="po-new">+ Nova população</button>`)}
     ${S.state.populations.length === 0
       ? `<div class="empty-state"><div class="big">Nenhuma população criada</div><p>Populações são opcionais no MVP, mas o domínio já está preparado para elas.</p></div>`
-      : `<div class="cards">${S.state.populations.map((pop) => `
+      : `<div class="cards">${S.state.populations.map((pop) => {
+        const popRuns = S.getPopulationRunsForPopulation(pop.id);
+        return `
         <div class="card persona-card">
           <div class="persona-name">${esc(pop.name)}</div>
           ${pop.description ? `<p class="persona-desc">${esc(pop.description)}</p>` : ""}
@@ -1030,7 +1037,24 @@ function viewPopulations(main) {
             <button class="btn btn-sm btn-ghost" data-rename="${pop.id}">Renomear</button>
             <button class="btn btn-sm btn-ghost btn-danger" data-del="${pop.id}">Excluir</button>
           </div>
-        </div>`).join("")}</div>`}`;
+          <div class="pop-run-history">
+            <div class="pop-run-history-title">Execuções${popRuns.length ? ` (${popRuns.length})` : ""}</div>
+            ${popRuns.length === 0 ? `<p class="faint small">Nenhuma execução ainda.</p>` : popRuns.slice(0, 5).map((pr) => {
+              const survey = S.state.surveys.find((s) => s.id === pr.surveyId) || pr.executionSnapshot?.survey;
+              const leitores = pr.executionSnapshot?.personas?.length ?? 0;
+              return `
+              <a class="pop-run-row" href="#/population-runs/${pr.id}">
+                <div class="pop-run-row-top">
+                  <span class="pop-run-row-title">${esc(pr.title || "(sem título)")}</span>
+                  ${populationRunStatusBadge(pr.status)}
+                </div>
+                <span class="faint small mono">${fmtDate(pr.createdAt)} · ${esc(survey ? survey.name : "—")} · ${leitores} leitor(es)</span>
+              </a>`;
+            }).join("")}
+            ${popRuns.length > 5 ? `<p class="faint small" style="margin:2px 0 0">+${popRuns.length - 5} execução(ões) anterior(es)</p>` : ""}
+          </div>
+        </div>`;
+      }).join("")}</div>`}`;
   $("#po-new").addEventListener("click", () => populationModal());
   $$("[data-exec]", main).forEach((b) => b.addEventListener("click", () => { location.hash = "#/populacoes/" + b.dataset.exec + "/executar"; }));
   $$("[data-members]", main).forEach((b) => b.addEventListener("click", () =>
@@ -1194,15 +1218,9 @@ function populationRunStatusBadge(status) {
 
 function viewPopulationRunDetail(main, popRunId) {
   let resumeAttempted = false;
+  let hubMounted = false;
 
-  const render = () => {
-    const popRun = S.state.populationRuns.find((p) => p.id === popRunId);
-    if (!popRun) {
-      main.innerHTML = `${pageHead("Execução de população", "", `<a class="btn" href="#/populacoes">Voltar</a>`)}
-        <div class="info-box warn"><span>⚠</span><span>Esta execução de população não foi encontrada.</span></div>`;
-      return;
-    }
-
+  const renderProgress = (popRun) => {
     const population = S.state.populations.find((p) => p.id === popRun.populationId);
     const snapshotPersonas = popRun.executionSnapshot?.personas || [];
     const total = snapshotPersonas.length;
@@ -1211,51 +1229,19 @@ function viewPopulationRunDetail(main, popRunId) {
     const completed = runs.filter((r) => r.status === "COMPLETED").length;
     const failed = runs.filter((r) => r.status === "FAILED").length;
     const pct = total ? Math.round(((completed + failed) / total) * 100) : 0;
-    const isRunning = popRun.status === "RUNNING" || popRun.status === "PENDING";
-
-    // Retoma automaticamente (uma única vez por montagem desta tela) uma
-    // execução presa em RUNNING sem loop ativo nesta aba — cobre o caso de
-    // a página ter sido recarregada no meio da execução.
-    if (popRun.status === "RUNNING" && !resumeAttempted && !isPopulationRunActive(popRun.id)) {
-      resumeAttempted = true;
-      resumePopulationRun(popRun.id).catch((err) => console.error("Falha ao retomar PopulationRun", err));
-    }
-
-    const finalPanel = popRun.status === "COMPLETED" ? `
-      <div class="info-box" style="margin-top:16px">
-        <span>✓</span>
-        <span>Todas as ${total} leitura(s) foram concluídas. <a href="#pr-persona-list">Ver resultados da população</a></span>
-      </div>`
-      : popRun.status === "PARTIAL" ? `
-      <div class="info-box warn" style="margin-top:16px">
-        <span>⚠</span>
-        <span>${completed} de ${total} leitores concluíram (${failed} falharam). <a href="#pr-persona-list">Ver resultados disponíveis</a></span>
-      </div>`
-      : popRun.status === "FAILED" ? `
-      <div class="info-box warn" style="margin-top:16px">
-        <span>✕</span>
-        <span>Nenhuma leitura pôde ser concluída.</span>
-      </div>`
-      : popRun.status === "CANCELLED" ? `
-      <div class="info-box warn" style="margin-top:16px">
-        <span>■</span>
-        <span>Execução cancelada. ${completed} de ${total} leitura(s) concluídas antes do cancelamento continuam disponíveis.</span>
-      </div>`
-      : "";
 
     main.innerHTML = `
       ${pageHead(
         `Execução de população · ${esc(popRun.title || population?.name || "")}`,
         `Population: <b>${esc(population?.name || "—")}</b>`,
-        `${isRunning ? `<button class="btn btn-danger" id="pr-cancel">Cancelar execução</button>` : ""}<a class="btn" href="#/populacoes">Voltar às populações</a>`
+        `<button class="btn btn-danger" id="pr-cancel">Cancelar execução</button><a class="btn" href="#/populacoes">Voltar às populações</a>`
       )}
       <div class="card" style="margin-bottom:18px">
         <div class="q-meta" style="margin-bottom:10px">${populationRunStatusBadge(popRun.status)}</div>
         <p class="mono">${completed + failed} / ${total} leituras concluídas${failed ? ` · ${failed} falharam` : ""}</p>
         <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
       </div>
-      ${finalPanel}
-      <div class="section-title" id="pr-persona-list">Personas</div>
+      <div class="section-title">Personas</div>
       <div class="pr-status-list">
         ${snapshotPersonas.map((persona) => {
           const run = runByPersona.get(persona.id);
@@ -1281,21 +1267,174 @@ function viewPopulationRunDetail(main, popRunId) {
       if (!confirm("Cancelar esta execução de população? Leituras já concluídas não serão apagadas.")) return;
       await cancelPopulationRun(popRun.id);
       toast("Execução de população cancelada.", "ok");
-      render();
+      tick();
     });
     $$("[data-toggle-err]", main).forEach((b) => b.addEventListener("click", () => {
       const box = document.getElementById("err-" + b.dataset.toggleErr);
       if (box) box.hidden = !box.hidden;
     }));
+  };
 
-    if (["COMPLETED", "FAILED", "CANCELLED"].includes(popRun.status) && activePoll) {
-      clearInterval(activePoll);
-      activePoll = null;
+  const tick = () => {
+    const popRun = S.state.populationRuns.find((p) => p.id === popRunId);
+    if (!popRun) {
+      main.innerHTML = `${pageHead("Execução de população", "", `<a class="btn" href="#/populacoes">Voltar</a>`)}
+        <div class="info-box warn"><span>⚠</span><span>Esta execução de população não foi encontrada.</span></div>`;
+      if (activePoll) { clearInterval(activePoll); activePoll = null; }
+      return;
+    }
+
+    const isRunning = popRun.status === "RUNNING" || popRun.status === "PENDING";
+    if (isRunning) {
+      hubMounted = false;
+      renderProgress(popRun);
+      // Retoma automaticamente (uma única vez por montagem desta tela) uma
+      // execução presa em RUNNING sem loop ativo nesta aba — cobre o caso de
+      // a página ter sido recarregada no meio da execução.
+      if (popRun.status === "RUNNING" && !resumeAttempted && !isPopulationRunActive(popRun.id)) {
+        resumeAttempted = true;
+        resumePopulationRun(popRun.id).catch((err) => console.error("Falha ao retomar PopulationRun", err));
+      }
+      return;
+    }
+
+    if (activePoll) { clearInterval(activePoll); activePoll = null; }
+    // Estado terminal: a partir daqui nada mais muda nesta execução — o hub
+    // é montado uma única vez (troca de aba não precisa de novo polling).
+    if (!hubMounted) {
+      hubMounted = true;
+      renderPopulationRunHub(main, popRun);
     }
   };
 
-  render();
-  activePoll = setInterval(render, 900);
+  tick();
+  activePoll = setInterval(tick, 900);
+}
+
+// ---------------------------------------------------- Hub de resultados
+// Tela de uma PopulationRun já finalizada (COMPLETED/PARTIAL/FAILED/
+// CANCELLED): cabeçalho com os metadados da execução + abas. Apenas
+// Resumo/Leitores/Dados são implementadas por completo nesta etapa —
+// Heatmap/Reações/Perguntas existem só como placeholder, preparando a
+// navegação para os módulos analíticos futuros.
+const HUB_TABS = [
+  ["resumo", "Resumo"],
+  ["heatmap", "Heatmap"],
+  ["reacoes", "Reações"],
+  ["perguntas", "Perguntas"],
+  ["leitores", "Leitores"],
+  ["dados", "Dados"],
+];
+
+function populationRunBundle(popRun) {
+  const readingRuns = S.getReadingRunsForPopulationRun(popRun.id);
+  const readingResults = readingRuns.map((r) => S.getResultForRun(r.id)).filter(Boolean);
+  return { populationRun: popRun, readingRuns, readingResults };
+}
+
+function renderPopulationRunHub(main, popRun) {
+  const population = S.state.populations.find((p) => p.id === popRun.populationId);
+  const survey = S.state.surveys.find((s) => s.id === popRun.surveyId) || popRun.executionSnapshot?.survey || null;
+  const snapshotPersonas = popRun.executionSnapshot?.personas || [];
+  const total = snapshotPersonas.length;
+  const runs = S.getReadingRunsForPopulationRun(popRun.id);
+  const runByPersona = new Map(runs.map((r) => [r.personaId, r]));
+  const completed = runs.filter((r) => r.status === "COMPLETED").length;
+  const failed = runs.filter((r) => r.status === "FAILED").length;
+
+  let activeTab = "resumo";
+
+  const renderTabContent = () => {
+    if (activeTab === "resumo") {
+      return `
+        <div class="cards" style="margin-bottom:16px">
+          <div class="card stat-card"><span class="stat-num">${total}</span><span class="stat-label">Leitores</span></div>
+          <div class="card stat-card"><span class="stat-num">${completed}</span><span class="stat-label">Concluídos</span></div>
+          <div class="card stat-card"><span class="stat-num">${failed}</span><span class="stat-label">Falharam</span></div>
+        </div>
+        <div class="card">
+          <div class="kv" style="margin-bottom:6px"><b class="muted">Survey:</b>&nbsp;${esc(survey ? survey.name : "(pesquisa removida)")}</div>
+          <div class="kv" style="margin-bottom:6px"><b class="muted">Modelo:</b>&nbsp;${esc(popRun.provider)} / ${esc(popRun.model)} · prompt ${esc(popRun.promptVersion)}</div>
+          <div class="kv"><b class="muted">Tempo total:</b>&nbsp;${fmtDuration(popRun.startedAt, popRun.completedAt)}</div>
+        </div>
+        <p class="faint small" style="margin-top:14px">Estatísticas agregadas (divergência entre leitores, heatmap de reações, respostas por pergunta) chegam em uma próxima etapa.</p>`;
+    }
+    if (activeTab === "leitores") {
+      return `
+        <div class="pr-status-list">
+          ${snapshotPersonas.map((persona) => {
+            const run = runByPersona.get(persona.id);
+            const status = run ? run.status : "PENDING";
+            const meta = RUN_STATE_META[status] || RUN_STATE_META.PENDING;
+            return `
+            <div class="pr-status-item">
+              <div class="pr-status-main">
+                <span class="pr-status-icon ${meta.cls}">${meta.icon}</span>
+                <div>
+                  <div>${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}</div>
+                  ${persona.shortDescription ? `<div class="faint small">${esc(persona.shortDescription)}</div>` : ""}
+                </div>
+              </div>
+              <div class="pr-status-side">
+                <span class="badge ${meta.cls}">${meta.label}</span>
+                ${run ? `<a class="btn btn-sm" href="#/execucoes/${run.id}">Ver relatório individual</a>` : ""}
+              </div>
+            </div>`;
+          }).join("")}
+        </div>`;
+    }
+    if (activeTab === "dados") {
+      return `
+        <div class="card">
+          <p class="muted small" style="margin-bottom:14px">JSON completo desta execução: PopulationRun, snapshot congelado (Population/Personas/Survey/Reações), ReadingRuns e ReadingResults. Nunca inclui chaves de API, tokens de sessão ou outros segredos — o app não os guarda localmente.</p>
+          <div class="toolbar" style="margin-bottom:0">
+            <button type="button" class="btn" id="pr-copy-json">Copiar JSON</button>
+            <button type="button" class="btn" id="pr-download-json">Baixar JSON</button>
+          </div>
+        </div>`;
+    }
+    return `<div class="empty-state"><div class="big">Em breve</div><p>Este módulo será implementado na próxima etapa.</p></div>`;
+  };
+
+  const renderAll = () => {
+    main.innerHTML = `
+      ${pageHead(
+        esc(popRun.title || "Execução de população"),
+        `${esc(population?.name || "—")} · ${total} leitor(es)${survey ? " · " + esc(survey.name) : ""}`,
+        `<a class="btn" href="#/populacoes">Voltar às populações</a>`
+      )}
+      <div class="card" style="margin-bottom:18px">
+        <div class="q-meta" style="margin-bottom:6px">
+          ${populationRunStatusBadge(popRun.status)}
+          <span class="mono small">${fmtDate(popRun.createdAt)}</span>
+          <span class="faint">·</span>
+          <span class="mono small">${fmtDuration(popRun.startedAt, popRun.completedAt)}</span>
+        </div>
+        <p class="mono">${completed}/${total} concluídas${failed ? ` · ${failed} falharam` : ""}</p>
+        <p class="hint" style="margin-top:6px">Provider/model: <span class="mono">${esc(popRun.provider)} / ${esc(popRun.model)}</span> · Prompt version: <span class="mono">${esc(popRun.promptVersion)}</span></p>
+        ${popRun.errorMessage ? `<p class="faint small" style="margin-top:6px">${esc(popRun.errorMessage)}</p>` : ""}
+      </div>
+      <div class="tabs" role="tablist">
+        ${HUB_TABS.map(([key, label]) => `<button type="button" class="tab-btn ${activeTab === key ? "active" : ""}" data-tab="${key}">${label}</button>`).join("")}
+      </div>
+      <div class="tab-panel">${renderTabContent()}</div>`;
+
+    $$("[data-tab]", main).forEach((b) => b.addEventListener("click", () => {
+      activeTab = b.dataset.tab;
+      renderAll();
+    }));
+
+    if (activeTab === "dados") {
+      const bundle = () => JSON.stringify(populationRunBundle(popRun), null, 2);
+      main.querySelector("#pr-copy-json")?.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(bundle()); toast("JSON copiado", "ok"); }
+        catch { toast("Não foi possível copiar", "bad"); }
+      });
+      main.querySelector("#pr-download-json")?.addEventListener("click", () => download(`readerlab-population-run-${popRun.id}.json`, bundle()));
+    }
+  };
+
+  renderAll();
 }
 
 // ================================================================== TAGS

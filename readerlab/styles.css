@@ -275,6 +275,21 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .pr-status-icon.neutral { color: var(--faint); }
 .pr-status-side { display: flex; align-items: center; gap: 8px; }
 .pr-error-msg { margin: -2px 0 4px; padding: 8px 14px; background: var(--bad-soft); border: 1px solid rgba(224,92,92,.3); border-radius: var(--radius-sm); color: #f2b8b8; font-size: 12.5px; }
+
+/* ============ Histórico de execuções (card de Population) ============ */
+.pop-run-history { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 6px; }
+.pop-run-history-title { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); }
+.pop-run-row { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: 7px; background: var(--bg-3); border: 1px solid transparent; color: var(--text); }
+.pop-run-row:hover { border-color: var(--line); text-decoration: none; }
+.pop-run-row-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pop-run-row-title { font-weight: 600; font-size: 13px; }
+
+/* ============ Hub de resultados da PopulationRun ============ */
+.tabs { display: flex; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid var(--line-soft); margin-bottom: 18px; }
+.tab-btn { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--muted); font: inherit; font-weight: 600; font-size: 13.5px; padding: 9px 2px; cursor: pointer; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-panel { min-height: 120px; }
 .checkbox-row input { width: auto; }
 .pop-members { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
