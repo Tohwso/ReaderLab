@@ -1225,15 +1225,21 @@ function populationRunStatusBadge(status) {
 
 // Banner informativo (NUNCA um erro da população, ver rateLimitManager.js)
 // mostrado quando o coordenador central de rate limit está segurando
-// novas chamadas ao provider (circuito aberto ou cooldown global) —
-// atualizado pelo mesmo polling de 900ms que já redesenha esta tela.
+// novas chamadas ao provider (circuito aberto, cooldown global, ou
+// orçamento preventivo de RPM/TPM) — atualizado pelo mesmo polling de
+// 900ms que já redesenha esta tela.
 function rateLimitBanner() {
   const state = kimiRateLimitManager.getState();
-  if (!state.limited) return "";
-  const untilMs = state.circuitOpenUntil || state.globalCooldownUntil;
-  const secs = untilMs ? Math.max(0, Math.round((untilMs - Date.now()) / 1000)) : null;
-  const label = state.circuitOpenUntil ? "Provider temporariamente limitado" : "Cooldown da API — aguardando para continuar";
-  return `<div class="info-box warn" style="margin-bottom:14px"><span>⏳</span><span>${esc(label)}${secs != null ? ` (~${secs}s)` : ""} — isto não é uma falha desta população, as próximas leituras retomam sozinhas.</span></div>`;
+  if (state.limited) {
+    const untilMs = state.circuitOpenUntil || state.globalCooldownUntil;
+    const secs = untilMs ? Math.max(0, Math.round((untilMs - Date.now()) / 1000)) : null;
+    const label = state.circuitOpenUntil ? "Provider temporariamente limitado" : "Cooldown da API — aguardando para continuar";
+    return `<div class="info-box warn" style="margin-bottom:14px"><span>⏳</span><span>${esc(label)}${secs != null ? ` (~${secs}s)` : ""} — isto não é uma falha desta população, as próximas leituras retomam sozinhas.</span></div>`;
+  }
+  if (state.budgetLimited) {
+    return `<div class="info-box warn" style="margin-bottom:14px"><span>⏳</span><span>Controlando ritmo para respeitar limite da API — as próximas leituras continuam automaticamente assim que a janela liberar.</span></div>`;
+  }
+  return "";
 }
 
 function viewPopulationRunDetail(main, popRunId, query = {}) {

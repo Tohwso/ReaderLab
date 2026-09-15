@@ -170,6 +170,62 @@ await test("I) isCancelled() interrompe a espera por uma vaga sem deixar o slot 
   assert.equal(third, "ok3");
 });
 
+// ----------------------------------------------------- Orçamento preventivo de RPM/TPM
+await test("J) orçamento de RPM: chamadas além do limite esperam a janela liberar (nunca gera erro)", async () => {
+  const mgr = makeManager({ maxConcurrency: 10, minRequestIntervalMs: 0, maxRpm: 2, safetyFactor: 1, budgetWindowMs: 150, sleepFn: realSleep });
+  const t0 = Date.now();
+  await mgr.run(() => Promise.resolve("ok"));
+  await mgr.run(() => Promise.resolve("ok"));
+  await mgr.run(() => Promise.resolve("ok")); // 3ª estoura o RPM=2 -> espera a janela (~150ms) liberar
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed >= 140, `esperava >=~150ms de espera pelo orçamento de RPM, decorreu ${elapsed}ms`);
+});
+
+await test("K) orçamento de TPM: soma estimada além do limite espera a janela liberar", async () => {
+  const mgr = makeManager({ maxConcurrency: 10, minRequestIntervalMs: 0, maxTpm: 100, safetyFactor: 1, budgetWindowMs: 150, sleepFn: realSleep });
+  const t0 = Date.now();
+  await mgr.run(() => Promise.resolve({ result: "a" }), { estimatedTokens: 60 });
+  await mgr.run(() => Promise.resolve({ result: "b" }), { estimatedTokens: 60 }); // 60+60=120 > 100 -> espera
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed >= 140, `esperava >=~150ms de espera pelo orçamento de TPM, decorreu ${elapsed}ms`);
+});
+
+await test("L) safetyFactor é aplicado sobre o RPM/TPM configurado (ex.: 20 RPM * 0.8 = 16 efetivo)", () => {
+  const mgr = makeManager({ maxRpm: 20, maxTpm: 1000, safetyFactor: 0.8 });
+  assert.equal(mgr.effectiveRpm, 16);
+  assert.equal(mgr.effectiveTpm, 800);
+});
+
+await test("M) usage real do provider substitui a estimativa conservadora na janela", async () => {
+  const mgr = makeManager({ maxConcurrency: 10, minRequestIntervalMs: 0, maxTpm: 50, safetyFactor: 1, budgetWindowMs: 5000, sleepFn: realSleep });
+  await mgr.run(() => Promise.resolve({ content: "x", usage: { total_tokens: 10 } }), { estimatedTokens: 1000 });
+  // Sem a substituição pelo usage real, a próxima chamada ficaria presa
+  // esperando os 1000 tokens ESTIMADOS originalmente saírem da janela de
+  // 5s (bem maior que o tempo desta asserção) — provando que o real (10)
+  // passou a valer no lugar da estimativa.
+  const start = Date.now();
+  await mgr.run(() => Promise.resolve({ content: "y" }), { estimatedTokens: 30 });
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 300, `esperava que a 2ª chamada não esperasse a janela inteira, decorreu ${elapsed}ms`);
+});
+
+await test("N) sem LLM_MAX_RPM/LLM_MAX_TPM configurados, nenhuma espera adicional é introduzida", async () => {
+  const mgr = makeManager({ maxConcurrency: 10, minRequestIntervalMs: 0, sleepFn: realSleep }); // maxRpm/maxTpm ausentes -> null
+  const t0 = Date.now();
+  for (let i = 0; i < 5; i++) await mgr.run(() => Promise.resolve("ok"));
+  assert.ok(Date.now() - t0 < 100, "nenhuma chamada deveria ter esperado o orçamento (desativado)");
+});
+
+await test("O) getState().budgetLimited fica true só enquanto aguarda o orçamento", async () => {
+  const mgr = makeManager({ maxConcurrency: 10, minRequestIntervalMs: 0, maxRpm: 1, safetyFactor: 1, budgetWindowMs: 100, sleepFn: realSleep });
+  await mgr.run(() => Promise.resolve("ok"));
+  const p = mgr.run(() => Promise.resolve("ok"));
+  await realSleep(20);
+  assert.equal(mgr.getState().budgetLimited, true);
+  await p;
+  assert.equal(mgr.getState().budgetLimited, false);
+});
+
 console.log(`\n${passed} teste(s) passaram.`);
 if (process.exitCode) {
   console.log("Alguns testes falharam.");

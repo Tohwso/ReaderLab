@@ -22,7 +22,12 @@
 //   3) concorrência máxima — espera (em pedaços pequenos, cancelável) até
 //      haver uma vaga;
 //   4) intervalo mínimo entre o INÍCIO de requests consecutivas — espera
-//      (idem) o restante desse intervalo.
+//      (idem) o restante desse intervalo;
+//   5) orçamento PREVENTIVO de RPM/TPM (ver _respectBudget) — janela
+//      deslizante simples dos últimos `budgetWindowMs` (default 60s):
+//      espera automaticamente (nunca gera FAILED) se a request excederia o
+//      RPM ou TPM configurado. Desativado (sem esperar nada) quando
+//      LLM_MAX_RPM/LLM_MAX_TPM não estão configurados — item 7 do pedido.
 import { LLM_ERROR_TYPES } from "./errorTypes.js";
 import { waitUntil, sleep } from "./retry.js";
 import {
@@ -30,6 +35,9 @@ import {
   LLM_MIN_REQUEST_INTERVAL_MS,
   LLM_CIRCUIT_BREAKER_THRESHOLD,
   LLM_CIRCUIT_BREAKER_COOLDOWN_MS,
+  LLM_MAX_RPM,
+  LLM_MAX_TPM,
+  LLM_RATE_LIMIT_SAFETY_FACTOR,
 } from "../config.js";
 
 export const CIRCUIT_STATE = { CLOSED: "CLOSED", OPEN: "OPEN", HALF_OPEN: "HALF_OPEN" };
@@ -68,6 +76,10 @@ export class RateLimitManager {
     minRequestIntervalMs = LLM_MIN_REQUEST_INTERVAL_MS,
     circuitBreakerThreshold = LLM_CIRCUIT_BREAKER_THRESHOLD,
     circuitBreakerCooldownMs = LLM_CIRCUIT_BREAKER_COOLDOWN_MS,
+    maxRpm = LLM_MAX_RPM,
+    maxTpm = LLM_MAX_TPM,
+    safetyFactor = LLM_RATE_LIMIT_SAFETY_FACTOR,
+    budgetWindowMs = 60000,
     sleepFn = sleep,
   } = {}) {
     this.provider = provider;
@@ -84,10 +96,21 @@ export class RateLimitManager {
     this.circuitOpenUntil = 0;
     this.consecutiveTransientErrors = 0;
     this.halfOpenTrialInFlight = false;
+
+    // Orçamento preventivo de RPM/TPM — `null` desativa o respectivo
+    // controle (item 7: sem configuração, funciona como antes). O fator de
+    // segurança já é aplicado aqui uma única vez (ex.: 20 RPM * 0.8 = 16).
+    this.effectiveRpm = maxRpm != null ? Math.max(1, Math.floor(maxRpm * safetyFactor)) : null;
+    this.effectiveTpm = maxTpm != null ? Math.max(1, Math.floor(maxTpm * safetyFactor)) : null;
+    this.budgetWindowMs = budgetWindowMs;
+    this._budgetWindow = []; // { id, startedAt, tokens, final } — janela deslizante simples
+    this._budgetSeq = 0;
+    this._budgetWaiting = false; // exposto via getState() para o banner "controlando ritmo" da UI
   }
 
   // Estado consultável pela UI (ver ui.js: banner "Provider temporariamente
-  // limitado"/"Cooldown da API") — nunca inclui secrets/manuscrito.
+  // limitado"/"Cooldown da API"/"Controlando ritmo...") — nunca inclui
+  // secrets/manuscrito.
   getState() {
     const now = Date.now();
     const cooldownUntil = this.globalCooldownUntil > now ? this.globalCooldownUntil : null;
@@ -99,6 +122,12 @@ export class RateLimitManager {
       globalCooldownUntil: cooldownUntil,
       active: this.active,
       limited: circuitOpenUntil != null || cooldownUntil != null,
+      // true enquanto uma chamada aguarda o orçamento de RPM/TPM liberar
+      // (nunca uma falha — ver _respectBudget) — distinto de `limited`
+      // acima, que é sobre circuito/cooldown reativos a um 429 real.
+      budgetLimited: this._budgetWaiting,
+      effectiveRpm: this.effectiveRpm,
+      effectiveTpm: this.effectiveTpm,
     };
   }
 
@@ -111,16 +140,23 @@ export class RateLimitManager {
   }
 
   // Ponto único de entrada: nunca chame provider.complete() diretamente
-  // para chamadas reais à LLM fora daqui.
-  async run(fn, { isCancelled } = {}) {
+  // para chamadas reais à LLM fora daqui. `estimatedTokens` (opcional): a
+  // melhor estimativa CONSERVADORA do chamador para o consumo total desta
+  // request (prompt + teto de saída) — usada apenas para o orçamento de
+  // TPM ANTES de a request acontecer; assim que ela conclui, a estimativa
+  // é substituída pelo usage real (ver _recordRequestFinal).
+  async run(fn, { isCancelled, estimatedTokens = 0 } = {}) {
     const isTrial = this._reserveCircuitPass();
     try {
       this._checkGlobalCooldown();
       await this._acquireSlot(isCancelled);
       try {
         await this._respectMinInterval(isCancelled);
+        await this._respectBudget(estimatedTokens, isCancelled);
         this.lastRequestStartedAt = Date.now();
+        const entry = this._recordRequestStart(estimatedTokens);
         const result = await fn();
+        this._recordRequestFinal(entry, result);
         this._onSuccess(isTrial);
         return result;
       } catch (err) {
@@ -190,6 +226,78 @@ export class RateLimitManager {
     if (nextAllowedAt > Date.now()) {
       const cancelled = await waitUntil(nextAllowedAt, { chunkMs: POLL_MS, isCancelled, sleepFn: this.sleepFn });
       if (cancelled) throw new RateLimitCancelledError();
+    }
+  }
+
+  // ------------------------------------------- Orçamento de RPM/TPM (janela deslizante)
+  // Descarta entradas mais antigas que `budgetWindowMs` — mantém a janela
+  // sempre "dos últimos N segundos", sem precisar de nenhum agendador
+  // separado (é recalculada a cada checagem, algoritmo deliberadamente
+  // simples conforme pedido).
+  _pruneBudgetWindow() {
+    const cutoff = Date.now() - this.budgetWindowMs;
+    while (this._budgetWindow.length && this._budgetWindow[0].startedAt < cutoff) this._budgetWindow.shift();
+  }
+
+  // Espera (em pedaços pequenos, cancelável, nunca gera FAILED) até que
+  // NEM o número de requests NEM os tokens estimados/reais na janela dos
+  // últimos `budgetWindowMs` ultrapassem o RPM/TPM efetivo configurado.
+  // Desativado por completo (retorna na hora) quando nenhum dos dois está
+  // configurado — item 7 do pedido.
+  async _respectBudget(estimatedTokens, isCancelled) {
+    if (this.effectiveRpm == null && this.effectiveTpm == null) return;
+    let waiting = false;
+    while (true) {
+      this._pruneBudgetWindow();
+      const requestCount = this._budgetWindow.length;
+      const tokenSum = this._budgetWindow.reduce((sum, e) => sum + e.tokens, 0);
+      const overRpm = this.effectiveRpm != null && requestCount >= this.effectiveRpm;
+      const overTpm = this.effectiveTpm != null && (tokenSum + estimatedTokens) > this.effectiveTpm;
+      if (!overRpm && !overTpm) break;
+      // Janela já vazia e ainda acima do limite: é a PRÓPRIA request
+      // (sozinha) que excede o teto configurado — esperar não ajudaria em
+      // nada (não há mais nada a expirar) e travaria para sempre. Deixamos
+      // seguir com um aviso, em vez de travar a run indefinidamente.
+      if (requestCount === 0) {
+        if (overTpm) {
+          this._log("estimativa desta request sozinha excede o LLM_MAX_TPM configurado — seguindo mesmo assim (nada a aguardar).", { estimatedTokens, effectiveTpm: this.effectiveTpm });
+        }
+        break;
+      }
+      if (!waiting) {
+        waiting = true;
+        this._budgetWaiting = true;
+        this._log("orçamento preventivo de RPM/TPM atingiria o limite configurado — aguardando a janela liberar (nunca gera FAILED).", {
+          overRpm, overTpm, requestCount, tokenSum, estimatedTokens, effectiveRpm: this.effectiveRpm, effectiveTpm: this.effectiveTpm,
+        });
+      }
+      if (isCancelled?.()) { this._budgetWaiting = false; throw new RateLimitCancelledError(); }
+      await this.sleepFn(POLL_MS);
+    }
+    if (waiting) this._budgetWaiting = false;
+  }
+
+  // Registrada ANTES de chamar fn(): conta para o RPM assim que a request
+  // é de fato disparada (nunca antes disso — uma rejeição por
+  // circuito/cooldown não chega a chamar fn(), então não conta).
+  _recordRequestStart(estimatedTokens) {
+    const entry = { id: ++this._budgetSeq, startedAt: Date.now(), tokens: Math.max(0, Math.round(estimatedTokens) || 0), final: false };
+    this._budgetWindow.push(entry);
+    return entry;
+  }
+
+  // Troca a estimativa pelo usage REAL do provider assim que ele chega
+  // (prompt_tokens/completion_tokens/total_tokens ou nomenclatura
+  // equivalente) — mantém o TPM da janela cada vez mais preciso ao longo
+  // do tempo, sem depender só de estimativa conservadora.
+  _recordRequestFinal(entry, result) {
+    const usage = result?.usage;
+    if (!usage) return;
+    const total = usage.total_tokens ?? usage.totalTokens
+      ?? ((usage.prompt_tokens ?? usage.promptTokens ?? 0) + (usage.completion_tokens ?? usage.completionTokens ?? 0));
+    if (typeof total === "number" && Number.isFinite(total) && total > 0) {
+      entry.tokens = total;
+      entry.final = true;
     }
   }
 

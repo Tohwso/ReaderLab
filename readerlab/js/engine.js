@@ -12,6 +12,7 @@ import { validateLLMResponse } from "./llm/validate.js";
 import { DemoProvider } from "./llm/demoProvider.js";
 import { runWithRetry } from "./llm/retry.js";
 import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
+import { estimateTokensConservative } from "./llm/tokenEstimate.js";
 import { LLM_READER_REASONING_EFFORT, LLM_READER_MAX_COMPLETION_TOKENS } from "./config.js";
 import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
 
@@ -88,7 +89,14 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
       userPrompt: user,
       ...(isDemo ? {} : { reasoningEffort: LLM_READER_REASONING_EFFORT, maxCompletionTokens: LLM_READER_MAX_COMPLETION_TOKENS }),
     });
-    const guardedCall = isDemo ? callProvider : () => kimiRateLimitManager.run(callProvider, { isCancelled });
+    const guardedCall = isDemo ? callProvider : () => kimiRateLimitManager.run(callProvider, {
+      isCancelled,
+      // Estimativa CONSERVADORA (prompt + teto de saída configurado) usada
+      // SOMENTE para o orçamento preventivo de RPM/TPM ANTES desta request
+      // acontecer — substituída pelo usage real assim que ela conclui (ver
+      // rateLimitManager.js). Nunca calculada/usada em demo.
+      estimatedTokens: estimateTokensConservative(system + user) + LLM_READER_MAX_COMPLETION_TOKENS,
+    });
 
     // Retry automático só para falhas TRANSITÓRIAS do provider (rate limit,
     // sobrecarga, rede, timeout, erro de servidor — ver llm/errorTypes.js).

@@ -68,3 +68,27 @@ export const LLM_MAX_CONCURRENCY = numberOverride("READERLAB_LLM_MAX_CONCURRENCY
 export const LLM_MIN_REQUEST_INTERVAL_MS = numberOverride("READERLAB_LLM_MIN_REQUEST_INTERVAL_MS", 3000);
 export const LLM_CIRCUIT_BREAKER_THRESHOLD = numberOverride("READERLAB_LLM_CIRCUIT_BREAKER_THRESHOLD", 5);
 export const LLM_CIRCUIT_BREAKER_COOLDOWN_MS = numberOverride("READERLAB_LLM_CIRCUIT_BREAKER_COOLDOWN_MS", 60000);
+
+// Orçamento PREVENTIVO de RPM/TPM (ver js/llm/rateLimitManager.js) — além
+// do circuit breaker/concorrência acima (que reagem DEPOIS de um 429), o
+// orçamento evita sequer disparar uma chamada que ultrapassaria o limite
+// conhecido do provider. `null` (não configurado) desativa o respectivo
+// controle e mantém o comportamento idêntico ao anterior — nunca inventamos
+// um limite do provider que o operador não informou explicitamente.
+// window.READERLAB_LLM_MAX_RPM / ..._MAX_TPM / ..._RATE_LIMIT_SAFETY_FACTOR.
+export const LLM_MAX_RPM = numberOverride("READERLAB_LLM_MAX_RPM", null);
+export const LLM_MAX_TPM = numberOverride("READERLAB_LLM_MAX_TPM", null);
+
+// Fração de segurança aplicada sobre LLM_MAX_RPM/LLM_MAX_TPM — ex.: 20 RPM
+// configurado * 0.8 => ReaderLab trabalha internamente com 16 RPM, deixando
+// margem para latência de rede/relógio/outras chamadas fora desta aba.
+function fractionOverride(windowKey, fallback) {
+  try {
+    if (typeof window !== "undefined" && window[windowKey] != null) {
+      const n = Number(window[windowKey]);
+      if (Number.isFinite(n) && n > 0 && n <= 1) return n;
+    }
+  } catch (_) { /* ambiente sem window */ }
+  return fallback;
+}
+export const LLM_RATE_LIMIT_SAFETY_FACTOR = fractionOverride("READERLAB_LLM_RATE_LIMIT_SAFETY_FACTOR", 0.8);
