@@ -63,7 +63,7 @@ export async function seedIfEmpty() {
   await db.metaSet("seeded", true);
 }
 
-// Personas de exemplo (R001–R010): semeadas uma única vez por workspace,
+// Personas de exemplo (R001–R100): semeadas uma única vez por workspace,
 // idempotentes por código. Excluir uma persona de seed não a recria no
 // próximo boot — "Restaurar dados de exemplo" recria todas.
 export async function ensureSeedPersonas() {
@@ -82,6 +82,22 @@ export async function ensureSeedPersonas() {
   await db.metaSet("seededPersonaCodes", done);
   sortAll();
   return report;
+}
+
+// Population seed ("Painel Geral — 100 Leitores"): idempotente por id fixo
+// (D.SEED_POPULATION_ID) — rodar de novo nunca duplica. Deve rodar depois
+// de ensureSeedPersonas() para que todas as R001–R100 já existam.
+export async function ensureSeedPopulation() {
+  if (state.populations.some((p) => p.id === D.SEED_POPULATION_ID)) return null;
+  const def = D.seedPopulationDef();
+  const byCode = new Map(state.personas.filter((p) => p.code).map((p) => [p.code, p.id]));
+  const personaIds = D.SEED_PERSONA_CODES.map((c) => byCode.get(c)).filter(Boolean);
+  const t = D.nowISO();
+  const pop = { id: def.id, name: def.name, description: def.description, personaIds, createdAt: t, updatedAt: t };
+  await db.put("populations", pop);
+  state.populations.push(pop);
+  state.populations.sort((a, b) => a.name.localeCompare(b.name));
+  return pop;
 }
 
 // --------------------------------------------------------------- genéricos
@@ -337,6 +353,7 @@ export async function resetToSeeds() {
   await db.metaSet("seededPersonaCodes", []);
   await loadAll();
   await ensureSeedPersonas();
+  await ensureSeedPopulation();
 }
 
 // ------------------------------------------------------------------- CSV

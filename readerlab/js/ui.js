@@ -2216,7 +2216,7 @@ function viewData(main) {
       <button class="btn" id="csv-pesquisas">Pesquisas (CSV)</button>
     </div>
     <div class="section-title">Zona de cuidado</div>
-    <div class="info-box warn"><span>⚠</span><span>Restaurar os dados de exemplo apaga <b>tudo</b> e recria o estado inicial: atributos, reações, pesquisas padrão e as 10 personas de exemplo (R001–R010).</span></div>
+    <div class="info-box warn"><span>⚠</span><span>Restaurar os dados de exemplo apaga <b>tudo</b> e recria o estado inicial: atributos, reações, pesquisas padrão, as 100 personas de exemplo (R001–R100) e a população "Painel Geral — 100 Leitores".</span></div>
     <div style="margin-top:12px"><button class="btn btn-danger" id="reset-seeds">Restaurar dados de exemplo</button></div>`;
 
   const stamp = new Date().toISOString().slice(0, 10);

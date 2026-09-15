@@ -24,6 +24,7 @@ async function startApp() {
   await S.seedIfEmpty();
   await S.loadAll();
   await S.ensureSeedPersonas();
+  await S.ensureSeedPopulation();
   UI.renderApp();
 }
 
