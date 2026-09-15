@@ -1840,11 +1840,26 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
     return segs;
   };
 
+  // Evidence tem dois formatos possíveis: legado (schema v1, texto livre
+  // `{ type, reference, value }`, nunca verificado deterministicamente) e
+  // estruturado (schema v2+, verificado contra o dataset — ver
+  // llm/researchAnalystValidate.js). Detecta pelo shape do próprio item,
+  // sem precisar propagar analysisSchemaVersion por toda a árvore de render.
   const renderEvidenceList = (evidence) => {
     if (!evidence || !evidence.length) return "";
-    return `<ul class="evidence-list">${evidence.map((e) =>
-      `<li><span class="badge neutral">${esc(e.type)}</span> <span class="mono small">${esc(e.reference)}</span>${e.value ? ` — <span class="mono">${esc(e.value)}</span>` : ""}</li>`
-    ).join("")}</ul>`;
+    const describe = (e) => {
+      if (e.reference !== undefined) {
+        return `<span class="badge neutral">${esc(e.type)}</span> <span class="mono small">${esc(e.reference)}</span>${e.value ? ` — <span class="mono">${esc(e.value)}</span>` : ""}`;
+      }
+      const ref = e.metricId || e.reactionCode || e.segmentId || e.questionId || "";
+      const bits = [`<span class="badge ok">${esc(e.type)}</span>`];
+      if (e.personaCode) bits.push(`<span class="mono small">${esc(e.personaCode)}</span>`);
+      if (ref) bits.push(`<span class="mono small">${esc(ref)}</span>`);
+      if (e.field) bits.push(`<span class="faint small">${esc(e.field)}</span>`);
+      if (e.value !== undefined && e.value !== "") bits.push(`— <span class="mono">${esc(String(e.value))}</span>`);
+      return bits.join(" ");
+    };
+    return `<ul class="evidence-list">${evidence.map((e) => `<li>${describe(e)}</li>`).join("")}</ul>`;
   };
 
   const confidenceBadge = (c) => {

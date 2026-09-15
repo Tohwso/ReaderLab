@@ -10,8 +10,14 @@ import * as D from "./domain.js";
 import { getProvider, ProviderError, providerErrorMessage } from "./llm/provider.js";
 import { buildPopulationAnalysisDataset } from "./analytics/populationAnalysisDatasetBuilder.js";
 import { buildResearchAnalystPrompt } from "./llm/researchAnalystPromptBuilder.js";
-import { validateResearchAnalysis } from "./llm/researchAnalystValidate.js";
+import { validateResearchAnalysis, RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION } from "./llm/researchAnalystValidate.js";
 import { DemoResearchAnalystProvider } from "./llm/demoResearchAnalyst.js";
+
+// Pipeline de uma tentativa: LLM → parse JSON → schema → evidence semântica
+// (ver researchAnalystValidate.js). NO MÁXIMO uma tentativa automática de
+// correção (nunca um loop) — se a 2ª tentativa também falhar, a AnalysisRun
+// vira FAILED (nunca é persistida como COMPLETED com evidence inválida).
+const MAX_ATTEMPTS = 2;
 
 // Gera uma NOVA AnalysisRun para a PopulationRun informada — nunca
 // sobrescreve uma análise anterior, o histórico é sempre preservado.
@@ -48,22 +54,50 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
 
   try {
     const provider = isDemo ? new DemoResearchAnalystProvider({ dataset }) : getProvider(liveCfg);
-    const { content, model, usage } = await provider.complete({ systemPrompt: system, userPrompt: user });
+
+    let userPrompt = user;
+    let model, usage;
+    let attempt = 0;
+    let value = null;
+    let lastErrors = [];
+
+    while (attempt < MAX_ATTEMPTS && !value) {
+      attempt++;
+      const res = await provider.complete({ systemPrompt: system, userPrompt });
+      model = res.model;
+      usage = res.usage;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(res.content);
+      } catch (_) {
+        lastErrors = ["O modelo retornou um JSON inválido."];
+        if (attempt < MAX_ATTEMPTS) userPrompt = buildResearchAnalystPrompt(dataset, { retryErrors: lastErrors }).user;
+        continue;
+      }
+
+      // validateResearchAnalysis(analysis, dataset): schema + evidence
+      // semântica contra o dataset determinístico numa única chamada —
+      // qualquer evidence fabricada/incorreta reprova a tentativa inteira.
+      const validation = validateResearchAnalysis(parsed, dataset);
+      if (validation.ok) {
+        value = validation.value;
+      } else {
+        lastErrors = validation.errors;
+        if (attempt < MAX_ATTEMPTS) userPrompt = buildResearchAnalystPrompt(dataset, { retryErrors: lastErrors }).user;
+      }
+    }
+
     if (!isDemo && model) analysisRun.model = model;
     if (usage) analysisRun.requestMetadata = { ...analysisRun.requestMetadata, tokenUsage: usage };
+    analysisRun.requestMetadata = { ...analysisRun.requestMetadata, attempts: attempt, retried: attempt > 1 };
 
-    let parsed;
-    try {
-      parsed = JSON.parse(content);
-    } catch (_) {
-      throw new ProviderError("INVALID_JSON", "O modelo retornou um JSON inválido.");
-    }
-    const validation = validateResearchAnalysis(parsed);
-    if (!validation.ok) {
-      throw new ProviderError("INVALID_SCHEMA", "Resposta fora do schema: " + validation.errors.slice(0, 5).join(" | "));
+    if (!value) {
+      throw new ProviderError("INVALID_EVIDENCE", "Resposta inválida após correção: " + lastErrors.slice(0, 5).join(" | "));
     }
 
-    analysisRun.analysisJson = validation.value;
+    analysisRun.analysisJson = value;
+    analysisRun.analysisSchemaVersion = RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION;
     analysisRun.status = "COMPLETED";
     analysisRun.completedAt = D.nowISO();
     await S.saveAnalysisRun(analysisRun);

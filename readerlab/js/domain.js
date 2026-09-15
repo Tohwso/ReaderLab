@@ -392,6 +392,7 @@ export function blankAnalysisRun() {
     completedAt: null,
     errorMessage: "",
     analysisJson: null, // saída da LLM já validada (ver llm/researchAnalystValidate.js)
+    analysisSchemaVersion: null, // versão do schema de evidence de analysisJson — null/ausente = legado (v1, evidence em texto livre); ver RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION
     executionSnapshot: null, // dataset determinístico usado nesta análise (nunca o texto/manuscrito)
     requestMetadata: null,
   };

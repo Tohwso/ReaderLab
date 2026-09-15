@@ -21,31 +21,38 @@ export class DemoResearchAnalystProvider {
     const polarizedMetric = [...metricsWithData].sort((a, b) => (b.divergence ?? 0) - (a.divergence ?? 0))[0];
     const topReaction = [...d.reactionAggregates].sort((a, b) => b.readerCount - a.readerCount)[0];
     const comparison = d.segmentComparisons[0];
+    const segA = comparison ? d.segments.find((s) => s.name === comparison.segmentA) : null;
+    const segB = comparison ? d.segments.find((s) => s.name === comparison.segmentB) : null;
+    const comparisonMetricA = segA ? segA.quantitativeMetrics.find((m) => m.n > 0) : null;
+    const comparisonMetricB = comparisonMetricA ? segB?.quantitativeMetrics.find((m) => m.questionId === comparisonMetricA.questionId) : null;
 
     const json = {
       executiveSummary: `Análise de demonstração (modo offline, sem chamada real a um modelo de linguagem) gerada a partir de ${d.populationRun.sampleSize} leitor(es) sintético(s), dos quais ${d.populationRun.completed} concluíram a leitura. Todos os números citados abaixo vêm diretamente do dataset determinístico do ReaderLab.`,
       consensus: consensusMetric ? [{
         title: `Consenso em "${consensusMetric.questionText}"`,
         observation: `A população apresentou baixa divergência nesta pergunta (média ${consensusMetric.mean}, N=${consensusMetric.n}).`,
-        evidence: [{ type: "metric", reference: consensusMetric.questionText, value: `mean=${consensusMetric.mean}; divergence=${Math.round((consensusMetric.divergence ?? 0) * 100)}%` }],
+        evidence: [{ type: "metric", metricId: consensusMetric.questionId, field: "mean", value: consensusMetric.mean }],
       }] : [],
       polarization: polarizedMetric ? [{
         title: `Divergência em "${polarizedMetric.questionText}"`,
-        observation: `Esta métrica apresentou o maior índice de divergência da execução (${Math.round((polarizedMetric.divergence ?? 0) * 100)}%, N=${polarizedMetric.n}).`,
+        observation: `Esta métrica apresentou o maior índice de divergência da execução (${polarizedMetric.divergence}, N=${polarizedMetric.n}).`,
         interpretation: "Modo demo: interpretação ilustrativa — não reflete a análise real de um modelo de linguagem.",
-        evidence: [{ type: "metric", reference: polarizedMetric.questionText, value: `divergence=${Math.round((polarizedMetric.divergence ?? 0) * 100)}%` }],
+        evidence: [{ type: "metric", metricId: polarizedMetric.questionId, field: "divergence", value: polarizedMetric.divergence }],
       }] : [],
       outliers: [],
-      segmentInsights: d.segments.map((s) => ({
-        segment: s.name,
-        observation: `Segmento com N=${s.n} leitor(es).`,
-        interpretation: "Modo demo: interpretação ilustrativa.",
-        evidence: [],
-      })),
+      segmentInsights: d.segments.map((s) => {
+        const m = s.quantitativeMetrics.find((mm) => mm.n > 0);
+        return {
+          segment: s.name,
+          observation: `Segmento com N=${s.n} leitor(es)${m ? ` — média ${m.mean} em "${m.questionText}"` : ""}.`,
+          interpretation: "Modo demo: interpretação ilustrativa.",
+          evidence: m ? [{ type: "segment", segmentId: s.name, metricId: m.questionId, field: "mean", value: m.mean }] : [],
+        };
+      }),
       reactionPatterns: topReaction ? [{
         reactionCode: topReaction.reactionCode,
         observation: `Reação mais frequente entre os leitores válidos: ${topReaction.reactionName} (${topReaction.percentage}% de ${topReaction.validReaderCount} leitor(es)).`,
-        evidence: [{ type: "reaction", reference: topReaction.reactionCode, value: `${topReaction.percentage}%` }],
+        evidence: [{ type: "reaction", reactionCode: topReaction.reactionCode, field: "percentage", value: topReaction.percentage }],
       }] : [],
       qualitativePatterns: [],
       interestingContradictions: [],
@@ -54,7 +61,10 @@ export class DemoResearchAnalystProvider {
         hypothesis: "Modo demo: hipótese ilustrativa sobre a diferença entre os segmentos configurados.",
         whyInvestigate: `N(${comparison.segmentA})=${comparison.nA}; N(${comparison.segmentB})=${comparison.nB}.`,
         confidence: Math.min(comparison.nA, comparison.nB) < 3 ? "low" : "medium",
-        evidence: [],
+        evidence: (comparisonMetricA && comparisonMetricB) ? [
+          { type: "segment", segmentId: segA.name, metricId: comparisonMetricA.questionId, field: "mean", value: comparisonMetricA.mean },
+          { type: "segment", segmentId: segB.name, metricId: comparisonMetricB.questionId, field: "mean", value: comparisonMetricB.mean },
+        ] : [],
       }] : [],
       limitations: [
         "Esta é uma análise de demonstração (modo offline) — não representa a interpretação real de um modelo de linguagem.",
