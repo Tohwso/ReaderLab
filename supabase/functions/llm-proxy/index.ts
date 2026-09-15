@@ -5,7 +5,7 @@
 // Continua sendo a única peça do backend que conhece o secret da API de
 // LLM — model/base URL/API key nunca vêm do frontend.
 //
-// Contrato de entrada: { systemPrompt: string, userPrompt: string, reasoning_effort?: string }
+// Contrato de entrada: { systemPrompt: string, userPrompt: string, reasoning_effort?: string, max_completion_tokens?: number }
 // Contrato de saída:   { content: string, model: string, usage?: {...} }
 //
 // Segredos (definir com `supabase secrets set ...`, nunca no código):
@@ -35,6 +35,9 @@ const ALLOWED_REASONING_EFFORTS = ["low", "medium", "high", "max"];
 const MAX_SYSTEM_PROMPT_CHARS = 20_000;
 const MAX_USER_PROMPT_CHARS = 200_000;
 const MAX_BODY_BYTES = 2_000_000; // 2MB — bem acima do necessário, só evita abuso grosseiro
+// Limite superior de sanidade para max_completion_tokens vindo do frontend —
+// nunca confiar cegamente num número arbitrário do chamador.
+const MAX_COMPLETION_TOKENS_CEILING = 1_048_576;
 
 function json(body: unknown, status: number, headers: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -139,6 +142,16 @@ Deno.serve(async (req: Request) => {
   const reasoningEffort = typeof body?.reasoning_effort === "string" && ALLOWED_REASONING_EFFORTS.includes(body.reasoning_effort)
     ? body.reasoning_effort
     : "low";
+  // Opcional — quando ausente/inválido, o upstream usa seu próprio default
+  // (ex.: Kimi K3 usa 131072). Repassado como veio, sem impor um default
+  // próprio aqui: quem decide o valor é o frontend (js/config.js), este
+  // proxy só valida sanidade.
+  const maxCompletionTokens = typeof body?.max_completion_tokens === "number"
+    && Number.isFinite(body.max_completion_tokens)
+    && body.max_completion_tokens > 0
+    && body.max_completion_tokens <= MAX_COMPLETION_TOKENS_CEILING
+    ? Math.floor(body.max_completion_tokens)
+    : null;
 
   const apiKey = Deno.env.get("LLM_API_KEY");
   if (!apiKey) {
@@ -160,6 +173,7 @@ Deno.serve(async (req: Request) => {
   const payload: Record<string, unknown> = { model, messages };
   if (!isKimiK3) payload.temperature = 0.7;
   if (isKimiK3) payload.reasoning_effort = reasoningEffort;
+  if (maxCompletionTokens) payload.max_completion_tokens = maxCompletionTokens;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);

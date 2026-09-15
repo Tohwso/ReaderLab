@@ -28,6 +28,9 @@ Registre somente reações realmente provocadas pelo texto.
 PESQUISA:
 Responda à pesquisa de maneira coerente com sua experiência de leitura, respeitando os tipos e limites de cada pergunta.
 
+CONCISÃO:
+Seja direto e objetivo em todos os campos de texto. Evite repetições, floreios e explicações desnecessárias. Respeite os limites de itens indicados no schema de saída.
+
 FORMATO DE SAÍDA:
 Responda EXCLUSIVAMENTE com um único objeto JSON válido, seguindo o schema fornecido. Nenhum texto fora do JSON.`;
 
@@ -92,33 +95,43 @@ function formatOutputSchema(survey) {
   const exampleQuestionId = survey.questions[0] ? survey.questions[0].id : "<question_id>";
   return `{
   "reactions": [
-    { "reaction_code": "<CODE de reação ativa>", "intensity": <0-100, somente se a reação permitir intensidade>, "reason": "<por que esta reação ocorreu>" }
+    { "reaction_code": "<CODE de reação ativa>", "intensity": <0-100, somente se a reação permitir intensidade>, "reason": "<motivo em 1 frase curta>" }
   ],
   "survey_answers": [
     { "question_id": "${exampleQuestionId}", "value": <resposta no tipo e limites da pergunta> }
   ],
-  "spontaneous_notes": ["<observação espontânea do leitor, se houver>"],
+  "spontaneous_notes": ["<observação espontânea, se houver>"],
   "reader_state": { "engagement": <0-100>, "curiosity": <0-100>, "fatigue": <0-100>, "confusions": [], "predictions": [] }
 }
 
 Observações:
-- "reactions" pode ser [].
 - "intensity" só deve aparecer para reações com intensidade habilitada (0–100).
 - Em "survey_answers", use os ids de pergunta listados na seção PESQUISA.
-- "spontaneous_notes" pode ser [].
-- "reader_state" é opcional nesta fase.`;
+- "reader_state" é opcional nesta fase.
+
+Limites de tamanho (obrigatórios — respostas mais longas serão cortadas):
+- "reactions": no máximo 8 itens.
+- "spontaneous_notes": no máximo 3 itens.
+- "confusions" e "predictions" (dentro de reader_state): no máximo 5 itens cada.
+- Respostas textuais da pesquisa devem responder à pergunta, mas de forma direta e sem repetição.`;
 }
 
 export function buildReadingPrompt({ persona, attributes, reactions, survey, text }) {
-  const user = [
+  const personaTags = persona.tags && persona.tags.length ? `\nTags: ${persona.tags.join(", ")}` : "";
+  const sections = [
     section("PERSONA") +
-      `Código: ${persona.code || "(sem código)"}\nNome: ${persona.name}\nTags: ${(persona.tags || []).join(", ") || "(nenhuma)"}`,
+      `Código: ${persona.code || "(sem código)"}\nNome: ${persona.name}${personaTags}`,
     section("ATRIBUTOS ESTRUTURADOS DA PERSONA (configuração canônica)") +
       formatAttributes(persona, attributes),
     section("PERFIL NARRATIVO (contexto e nuance — nunca sobrescreve os atributos)") +
       formatNarrativeProfile(persona),
-    section("INSTRUÇÕES COMPORTAMENTAIS") +
-      (persona.instructions || "(nenhuma instrução específica)"),
+  ];
+  // Campo vazio nunca vira seção só com um placeholder — se a Persona não
+  // tem instruções comportamentais, a seção inteira é omitida.
+  if (persona.instructions) {
+    sections.push(section("INSTRUÇÕES COMPORTAMENTAIS") + persona.instructions);
+  }
+  sections.push(
     section("TEXTO PARA LEITURA (único contexto desta execução)") +
       `<<<TEXTO INÍCIO>>>\n${text}\n<<<TEXTO FIM>>>`,
     section("TAXONOMIA DE REAÇÕES ATIVAS (nenhuma é obrigatória)") +
@@ -127,7 +140,7 @@ export function buildReadingPrompt({ persona, attributes, reactions, survey, tex
       `${survey.name}\n${formatSurvey(survey)}`,
     section("SCHEMA DE SAÍDA (responda APENAS este JSON)") +
       formatOutputSchema(survey),
-  ].join("\n");
+  );
 
-  return { system: SYSTEM_INSTRUCTION, user, promptVersion: "v1" };
+  return { system: SYSTEM_INSTRUCTION, user: sections.join("\n"), promptVersion: "v1" };
 }

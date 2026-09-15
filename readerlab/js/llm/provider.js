@@ -68,13 +68,18 @@ export function providerErrorMessage(err) {
 }
 
 // Interface conceitual LLMProvider:
-//   complete({ systemPrompt, userPrompt }) -> { content: string, raw: any }
+//   complete({ systemPrompt, userPrompt, reasoningEffort?, maxCompletionTokens? }) -> { content: string, raw: any }
+// `reasoningEffort`/`maxCompletionTokens` são OPCIONAIS e nunca têm default
+// aqui — quem decide enviá-los é o chamador (ex.: engine.js, só para
+// ReadingRuns, usando js/config.js como única fonte de verdade). Isso
+// garante que nenhum outro chamador/provider herde esses valores sem pedir
+// explicitamente (ver LLM_READER_REASONING_EFFORT/LLM_READER_MAX_COMPLETION_TOKENS).
 export class KimiProvider {
   constructor(cfg = getLLMConfig()) {
     this.cfg = cfg;
   }
 
-  async complete({ systemPrompt, userPrompt }) {
+  async complete({ systemPrompt, userPrompt, reasoningEffort, maxCompletionTokens }) {
     if (!this.cfg.endpoint) {
       throw new ProviderError(
         "NOT_CONFIGURED",
@@ -98,7 +103,12 @@ export class KimiProvider {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ systemPrompt, userPrompt }),
+        body: JSON.stringify({
+          systemPrompt,
+          userPrompt,
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+          ...(maxCompletionTokens ? { max_completion_tokens: maxCompletionTokens } : {}),
+        }),
         signal: controller.signal,
       });
     } catch (err) {

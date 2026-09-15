@@ -35,6 +35,28 @@ export const LLM_MAX_ATTEMPTS = numberOverride("READERLAB_LLM_MAX_ATTEMPTS", 6);
 export const LLM_RETRY_BASE_DELAY_MS = numberOverride("READERLAB_LLM_RETRY_BASE_DELAY_MS", 2000);
 export const LLM_RETRY_MAX_DELAY_MS = numberOverride("READERLAB_LLM_RETRY_MAX_DELAY_MS", 120000);
 
+// Mesmo padrão de override acima, mas para configs de valor string (ex.:
+// reasoning_effort). `allowed`, quando informado, restringe os valores
+// aceitos — um override inválido é ignorado silenciosamente (cai no default).
+function stringOverride(windowKey, fallback, allowed) {
+  try {
+    if (typeof window !== "undefined" && typeof window[windowKey] === "string") {
+      const v = window[windowKey];
+      if (!allowed || allowed.includes(v)) return v;
+    }
+  } catch (_) { /* ambiente sem window */ }
+  return fallback;
+}
+
+// Parâmetros enviados EXPLICITAMENTE ao Kimi K3 nas ReadingRuns (ver
+// js/llm/provider.js + js/engine.js) para reduzir latência/tokens de saída
+// sem degradar materialmente a qualidade da avaliação. Única fonte de
+// verdade — nunca hardcodear em engine.js/provider.js. Aplicado SOMENTE às
+// ReadingRuns: o Research Analyst (js/analysisEngine.js) não usa estas
+// constantes e pode ganhar sua própria configuração equivalente no futuro.
+export const LLM_READER_REASONING_EFFORT = stringOverride("READERLAB_LLM_READER_REASONING_EFFORT", "low", ["low", "high", "max"]);
+export const LLM_READER_MAX_COMPLETION_TOKENS = numberOverride("READERLAB_LLM_READER_MAX_COMPLETION_TOKENS", 3000);
+
 // Rate Limit Manager central (ver js/llm/rateLimitManager.js) — único
 // coordenador por onde passam TODAS as chamadas reais à LLM, para que N
 // ReadingRuns (de uma ou mais PopulationRuns) nunca ataquem a API de forma

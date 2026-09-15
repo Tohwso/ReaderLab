@@ -12,6 +12,7 @@ import { validateLLMResponse } from "./llm/validate.js";
 import { DemoProvider } from "./llm/demoProvider.js";
 import { runWithRetry } from "./llm/retry.js";
 import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
+import { LLM_READER_REASONING_EFFORT, LLM_READER_MAX_COMPLETION_TOKENS } from "./config.js";
 import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
 
 // Executa uma ReadingRun até seu status final (COMPLETED|FAILED) — ou a
@@ -68,6 +69,10 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
       reactionCount: activeReactions.length,
       questionCount: survey.questions.length,
       snapshotVersion: 1,
+      // Parâmetros efetivamente enviados ao provider real nesta execução —
+      // ausente em demo (não bate em API nenhuma). Fonte única de verdade:
+      // js/config.js (nunca hardcoded aqui, ver LLM_READER_*).
+      ...(isDemo ? {} : { readerLLMParams: { reasoningEffort: LLM_READER_REASONING_EFFORT, maxCompletionTokens: LLM_READER_MAX_COMPLETION_TOKENS } }),
     };
     const provider = isDemo
       ? new DemoProvider({ persona, attributes: attributeCatalog, reactions: activeReactions, survey })
@@ -75,8 +80,14 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     // Provider demo/local nunca bate em API nenhuma — só chamadas REAIS
     // passam pelo coordenador central de rate limit (nunca duplicar isto
     // por ReadingRun: é o mesmo coordenador para toda a aba, ver
-    // llm/rateLimitManager.js).
-    const callProvider = () => provider.complete({ systemPrompt: system, userPrompt: user });
+    // llm/rateLimitManager.js). reasoning_effort/max_completion_tokens só são
+    // enviados aqui (ReadingRun) — nunca viram default dentro do provider em
+    // si, para não vazar para outros chamadores (ex.: Research Analyst).
+    const callProvider = () => provider.complete({
+      systemPrompt: system,
+      userPrompt: user,
+      ...(isDemo ? {} : { reasoningEffort: LLM_READER_REASONING_EFFORT, maxCompletionTokens: LLM_READER_MAX_COMPLETION_TOKENS }),
+    });
     const guardedCall = isDemo ? callProvider : () => kimiRateLimitManager.run(callProvider, { isCancelled });
 
     // Retry automático só para falhas TRANSITÓRIAS do provider (rate limit,
@@ -86,7 +97,7 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     // um next_retry_at persistido (nunca um setTimeout como única fonte de
     // verdade) — nunca vira FAILED só por causa de um 429/503 isolado
     // (critério de aceite desta funcionalidade).
-    const { content, model } = await runWithRetry(
+    const { content, model, usage } = await runWithRetry(
       guardedCall,
       {
         startAttempt: (run.attemptCount || 0) + 1,
@@ -131,6 +142,10 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
       run.model = model;
       run.executionSnapshot.llmConfig.model = model;
     }
+    // usage vem do provider real (prompt_tokens/completion_tokens/total_tokens,
+    // ou nomenclatura equivalente do backend) — nunca disponível em demo.
+    // Persistido para observabilidade/otimização futura (ver requestMetadata).
+    if (usage) run.requestMetadata = { ...run.requestMetadata, tokenUsage: usage };
 
     let parsed;
     try {
