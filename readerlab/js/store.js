@@ -12,6 +12,7 @@ export const state = {
   runs: [],
   results: [],
   populationRuns: [],
+  analysisRuns: [],
   ready: false,
 };
 
@@ -29,6 +30,7 @@ export function resetState() {
   state.runs = [];
   state.results = [];
   state.populationRuns = [];
+  state.analysisRuns = [];
   state.ready = false;
 }
 
@@ -40,14 +42,15 @@ function sortAll() {
 }
 
 export async function loadAll() {
-  const [personas, attributes, reactions, surveys, tags, populations, runs, results, populationRuns] = await Promise.all([
+  const [personas, attributes, reactions, surveys, tags, populations, runs, results, populationRuns, analysisRuns] = await Promise.all([
     db.getAll("personas"), db.getAll("attributes"), db.getAll("reactions"),
     db.getAll("surveys"), db.getAll("tags"), db.getAll("populations"),
-    db.getAll("runs"), db.getAll("results"), db.getAll("populationRuns"),
+    db.getAll("runs"), db.getAll("results"), db.getAll("populationRuns"), db.getAll("analysisRuns"),
   ]);
-  Object.assign(state, { personas, attributes, reactions, surveys, tags, populations, runs, results, populationRuns, ready: true });
+  Object.assign(state, { personas, attributes, reactions, surveys, tags, populations, runs, results, populationRuns, analysisRuns, ready: true });
   state.runs.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   state.populationRuns.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  state.analysisRuns.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   sortAll();
 }
 
@@ -273,6 +276,18 @@ export const getReadingRunsForPopulationRun = (populationRunId) =>
 export const getPopulationRunsForPopulation = (populationId) =>
   state.populationRuns.filter((p) => p.populationId === populationId);
 
+// ------------------------------------------------- Análises (Research Analyst)
+export async function saveAnalysisRun(run) {
+  await db.put("analysisRuns", run);
+  const i = state.analysisRuns.findIndex((x) => x.id === run.id);
+  if (i >= 0) state.analysisRuns[i] = run; else state.analysisRuns.unshift(run);
+  state.analysisRuns.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  return run;
+}
+
+export const getAnalysisRunsForPopulationRun = (populationRunId) =>
+  state.analysisRuns.filter((a) => a.populationRunId === populationRunId);
+
 // ---------------------------------------------------- Importação / Exportação
 export function exportAll() {
   return {
@@ -289,6 +304,7 @@ export function exportAll() {
       runs: state.runs,
       results: state.results,
       populationRuns: state.populationRuns,
+      analysisRuns: state.analysisRuns,
     },
   };
 }
@@ -308,6 +324,7 @@ export async function importAll(payload) {
   await db.bulkPut("runs", d.runs || []);
   await db.bulkPut("results", d.results || []);
   await db.bulkPut("populationRuns", d.populationRuns || []);
+  await db.bulkPut("analysisRuns", d.analysisRuns || []);
   await db.metaSet("seeded", true);
   await loadAll();
 }

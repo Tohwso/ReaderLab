@@ -150,6 +150,24 @@ create index if not exists population_runs_owner_idx on population_runs (owner_i
 create index if not exists population_runs_population_idx on population_runs (population_id);
 create index if not exists population_runs_status_idx on population_runs (status);
 
+-- ------------------------------------------------------- analysis_runs
+-- Uma AnalysisRun representa UMA interpretação, por IA, dos resultados JÁ
+-- produzidos por uma PopulationRun (Research Analyst — ver
+-- js/analysisEngine.js). Nunca lê nem altera ReadingRuns/ReadingResults;
+-- cada geração cria uma nova linha (histórico completo, nunca sobrescrito).
+create table if not exists analysis_runs (
+  id text primary key,
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  data jsonb not null default '{}'::jsonb,
+  population_run_id text generated always as (data->>'populationRunId') stored,
+  status text generated always as (data->>'status') stored,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists analysis_runs_owner_idx on analysis_runs (owner_id);
+create index if not exists analysis_runs_population_run_idx on analysis_runs (population_run_id);
+create index if not exists analysis_runs_status_idx on analysis_runs (status);
+
 -- --------------------------------------------------------------- results
 create table if not exists results (
   id text primary key,
@@ -177,7 +195,7 @@ create table if not exists meta (
 do $$
 declare t text;
 begin
-  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','population_runs','meta'])
+  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','population_runs','analysis_runs','meta'])
   loop
     execute format('drop trigger if exists trg_%1$s_updated_at on %1$s;', t);
     execute format('create trigger trg_%1$s_updated_at before update on %1$s for each row execute function set_updated_at();', t);
@@ -193,7 +211,7 @@ end $$;
 do $$
 declare t text;
 begin
-  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','population_runs','meta'])
+  for t in select unnest(array['personas','attributes','reactions','surveys','tags','populations','runs','results','population_runs','analysis_runs','meta'])
   loop
     execute format('alter table %1$s enable row level security;', t);
     execute format('drop policy if exists %1$s_rw on %1$s;', t);

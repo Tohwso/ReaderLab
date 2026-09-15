@@ -18,11 +18,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 
-export const STORES = ["personas", "attributes", "reactions", "surveys", "tags", "populations", "runs", "results", "populationRuns"];
+export const STORES = ["personas", "attributes", "reactions", "surveys", "tags", "populations", "runs", "results", "populationRuns", "analysisRuns"];
 
 // Nomes de store (camelCase, usados no JS) que divergem do nome real da
-// tabela Postgres (snake_case) — hoje só populationRuns/population_runs.
-const TABLE_NAMES = { populationRuns: "population_runs" };
+// tabela Postgres (snake_case).
+const TABLE_NAMES = { populationRuns: "population_runs", analysisRuns: "analysis_runs" };
 
 // "connecting" | "supabase" | "offline" — usado pela UI para avisos de estado
 // de CONEXÃO (não de autenticação — ver isAuthenticated()/onAuthChange()).

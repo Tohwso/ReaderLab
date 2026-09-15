@@ -5,7 +5,8 @@ import { persistenceMode, signOut } from "./db.js";
 import { getLLMConfig } from "./llm/provider.js";
 import { renderRunResultView } from "./components/runResultView.js";
 import { executeReadingRun, executePopulationRun, resumePopulationRun, cancelPopulationRun, isPopulationRunActive } from "./engine.js";
-import { describeQuestionValues } from "./analytics/statistics.js";
+import { SEGMENT_RULE_OPS, filterPersonasBySegment, computeQuestionStats, computeReactionAggregates } from "./analytics/populationMetrics.js";
+import { runPopulationAnalysis } from "./analysisEngine.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -1325,20 +1326,11 @@ const HUB_TABS = [
   ["heatmap", "Heatmap"],
   ["reacoes", "Reações"],
   ["segmentos", "Segmentos"],
+  ["analise", "Análise"],
   ["perguntas", "Perguntas"],
   ["leitores", "Leitores"],
   ["dados", "Dados"],
 ];
-
-// Operadores suportados pelos filtros de segmento — comparação simples e
-// determinística, sem clustering automático.
-const SEGMENT_RULE_OPS = {
-  "<": (a, b) => a < b,
-  "<=": (a, b) => a <= b,
-  ">": (a, b) => a > b,
-  ">=": (a, b) => a >= b,
-  "==": (a, b) => a === b,
-};
 
 // Presets iniciais referenciados por SLUG do atributo (nunca por ID) — só
 // aparecem se o atributo correspondente existir no catálogo atual.
@@ -1380,6 +1372,8 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   let segmentBRules = [];
   // Presets salvos nesta sessão (sem persistência — reinicia ao sair do hub).
   let customPresets = [];
+  let analysisRunning = false;
+  let selectedAnalysisId = null;
 
   // Link contextual para o relatório individual — preserva de onde veio
   // (esta PopulationRun + aba atual) para o botão "Voltar" funcionar.
@@ -1411,16 +1405,10 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
     ...customPresets,
   ];
 
-  // Persona sem valor EXPLÍCITO para um atributo da regra nunca entra no
-  // segmento — nunca tratamos ausência como o valor default (ex.: 50).
-  const personaMatchesRules = (persona, rules) => rules.every((r) => {
-    const v = persona.attributeValues ? persona.attributeValues[r.attributeId] : undefined;
-    if (v == null || typeof v !== "number" || !r.attributeId || r.value === "" || r.value == null) return false;
-    const cmp = SEGMENT_RULE_OPS[r.op];
-    return cmp ? cmp(v, Number(r.value)) : false;
-  });
-
-  const segmentPersonas = (rules) => (rules.length ? snapshotPersonas.filter((p) => personaMatchesRules(p, rules)) : snapshotPersonas);
+  // Filtro de segmento e busca de fonte única — reutiliza literalmente as
+  // mesmas fórmulas do módulo compartilhado (também usado pelo dataset do
+  // Research Analyst).
+  const segmentPersonas = (rules) => filterPersonasBySegment(snapshotPersonas, rules);
   const runsForPersonas = (personaList) => runs.filter((r) => personaList.some((p) => p.id === r.personaId));
 
   // Colunas dinâmicas: perguntas quantitativas (scale/number) da Survey
@@ -1433,22 +1421,8 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   // deu o maior/menor valor para permitir navegar até o leitor de origem.
   // Aceita um subconjunto de ReadingRuns (usado pela aba Segmentos); por
   // padrão considera todos os leitores desta PopulationRun.
-  const questionStats = (runsSubset = runs) => heatmapQuestions.map((q) => {
-    const entries = runsSubset
-      .filter((r) => r.status === "COMPLETED")
-      .map((r) => {
-        const ans = S.getResultForRun(r.id)?.surveyAnswers.find((a) => a.questionId === q.id);
-        if (!ans || typeof ans.value !== "number") return null;
-        return { run: r, persona: snapshotPersonas.find((p) => p.id === r.personaId), value: ans.value };
-      })
-      .filter(Boolean);
-    const stats = describeQuestionValues(entries.map((e) => e.value), { min: q.min ?? 0, max: q.max ?? 100 });
-    return {
-      question: q, stats,
-      maxEntry: stats.n ? entries.find((e) => e.value === stats.max) : null,
-      minEntry: stats.n ? entries.find((e) => e.value === stats.min) : null,
-    };
-  });
+  const questionStats = (runsSubset = runs) =>
+    computeQuestionStats(heatmapQuestions, runsSubset, snapshotPersonas, S.getResultForRun);
 
   const sortedQuestionStats = () => {
     const list = questionStats();
@@ -1596,34 +1570,8 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
   // criadas/renomeadas depois não contaminam o histórico. Aceita um
   // subconjunto de ReadingRuns (usado pela aba Segmentos); por padrão
   // considera todos os leitores desta PopulationRun.
-  const computeReactionStats = (runsSubset = runs) => {
-    const snapshotReactions = popRun.executionSnapshot?.reactions || [];
-    const validEntries = runsSubset
-      .filter((r) => r.status === "COMPLETED")
-      .map((r) => ({ run: r, result: S.getResultForRun(r.id) }))
-      .filter((x) => x.result);
-    const validCount = validEntries.length;
-    const stats = snapshotReactions.map((def) => {
-      const matches = validEntries
-        .map(({ run, result }) => {
-          const rr = result.reactions.find((x) => x.reactionCode === def.code);
-          if (!rr) return null;
-          const persona = snapshotPersonas.find((p) => p.id === run.personaId);
-          return { run, rr, persona };
-        })
-        .filter(Boolean);
-      const intensities = def.intensityEnabled ? matches.map((m) => m.rr.intensity).filter((v) => typeof v === "number") : [];
-      const count = matches.length;
-      return {
-        def, matches, count,
-        pct: validCount ? Math.round((count / validCount) * 100) : 0,
-        avg: intensities.length ? Math.round(intensities.reduce((a, b) => a + b, 0) / intensities.length) : null,
-        min: intensities.length ? Math.min(...intensities) : null,
-        max: intensities.length ? Math.max(...intensities) : null,
-      };
-    });
-    return { validCount, stats };
-  };
+  const computeReactionStats = (runsSubset = runs) =>
+    computeReactionAggregates(popRun.executionSnapshot?.reactions || [], runsSubset, snapshotPersonas, S.getResultForRun);
 
   const renderReactionDrilldown = (s) => {
     if (!s.matches.length) return `<p class="faint small" style="padding:0 2px">Nenhum leitor registrou esta reação.</p>`;
@@ -1872,6 +1820,120 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
       ${renderOutliers()}`;
   };
 
+  // ------------------------------------------------- Aba Análise (Research Analyst)
+  // O Research Analyst interpreta os agregados já calculados por esta
+  // PopulationRun (nunca recalcula estatística) — ver js/analysisEngine.js.
+  // Reutiliza as regras de segmento já configuradas na aba Segmentos, sem
+  // duplicar UI de filtro.
+  const isCompleteRuleSet = (rules) => rules.length > 0 && rules.every((r) => r.attributeId && r.value !== "" && r.value != null);
+
+  const activeSegmentsForAnalysis = () => {
+    const segs = [];
+    if (isCompleteRuleSet(segmentARules)) {
+      segs.push({ name: segmentCompareMode === "vs-segment" ? "Segmento A" : "Segmento", rules: segmentARules.map((r) => ({ ...r })) });
+    }
+    if (segmentCompareMode === "vs-segment" && isCompleteRuleSet(segmentBRules)) {
+      segs.push({ name: "Segmento B", rules: segmentBRules.map((r) => ({ ...r })) });
+    }
+    return segs;
+  };
+
+  const renderEvidenceList = (evidence) => {
+    if (!evidence || !evidence.length) return "";
+    return `<ul class="evidence-list">${evidence.map((e) =>
+      `<li><span class="badge neutral">${esc(e.type)}</span> <span class="mono small">${esc(e.reference)}</span>${e.value ? ` — <span class="mono">${esc(e.value)}</span>` : ""}</li>`
+    ).join("")}</ul>`;
+  };
+
+  const confidenceBadge = (c) => {
+    const cls = c === "high" ? "ok" : c === "medium" ? "accent" : "neutral";
+    const label = c === "high" ? "Confiança alta" : c === "medium" ? "Confiança média" : "Confiança baixa";
+    return `<span class="badge ${cls}" title="Quão diretamente os dados sustentam esta hipótese — não é significância estatística.">${label}</span>`;
+  };
+
+  const renderAnalysisReport = (run) => {
+    const a = run.analysisJson;
+    const outlierLink = (code) => {
+      const persona = snapshotPersonas.find((p) => p.code === code);
+      const orun = persona ? runByPersona.get(persona.id) : null;
+      return orun ? `<a class="btn btn-sm" href="${runReportLink(orun.id)}">Ver relatório individual</a>` : "";
+    };
+    const cardsGrid = (items, render) => items.length
+      ? `<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:18px">${items.map(render).join("")}</div>`
+      : "";
+
+    return `
+      <div class="card" style="margin-bottom:16px">
+        <div class="q-meta" style="margin-bottom:8px">
+          <span class="badge ${run.status === "COMPLETED" ? "ok" : run.status === "FAILED" ? "bad" : "accent"}">${esc(D.ANALYSIS_RUN_STATUS[run.status] || run.status)}</span>
+          <span class="mono small">${fmtDate(run.createdAt)}</span>
+          <span class="faint">·</span>
+          <span class="mono small">${esc(run.provider)} / ${esc(run.model)}</span>
+          <span class="faint">·</span>
+          <span class="mono small">prompt ${esc(run.promptVersion)}</span>
+        </div>
+        ${run.status === "FAILED" ? `<div class="info-box bad"><span>⚠</span><span>${esc(run.errorMessage || "Falha desconhecida.")}</span></div>` : ""}
+      </div>
+      ${!a ? `<div class="empty-state"><div class="big">Sem resultado estruturado</div><p>Esta análise não produziu um resultado válido.</p></div>` : `
+      ${a.executiveSummary ? `<div class="card" style="margin-bottom:18px"><div class="section-title" style="margin-top:0">Resumo executivo</div><p>${esc(a.executiveSummary)}</p></div>` : ""}
+      ${a.consensus.length ? `<div class="section-title">Consensos</div>${cardsGrid(a.consensus, (c) => `<div class="card"><div class="qstat-title">${esc(c.title)}</div><p class="muted small">${esc(c.observation)}</p>${renderEvidenceList(c.evidence)}</div>`)}` : ""}
+      ${a.polarization.length ? `<div class="section-title">Polarizações</div>${cardsGrid(a.polarization, (p) => `<div class="card"><div class="qstat-title">${esc(p.title)}</div><p class="muted small">${esc(p.observation)}</p>${p.interpretation ? `<p class="faint small"><i>${esc(p.interpretation)}</i></p>` : ""}${renderEvidenceList(p.evidence)}</div>`)}` : ""}
+      ${a.segmentInsights.length ? `<div class="section-title">Diferenças entre segmentos</div>${cardsGrid(a.segmentInsights, (s) => `<div class="card"><div class="qstat-title">${esc(s.segment)}</div><p class="muted small">${esc(s.observation)}</p>${s.interpretation ? `<p class="faint small"><i>${esc(s.interpretation)}</i></p>` : ""}${renderEvidenceList(s.evidence)}</div>`)}` : ""}
+      ${a.outliers.length ? `<div class="section-title">Outliers</div><div class="pr-status-list" style="margin-bottom:18px">${a.outliers.map((o) => `
+        <div class="pr-status-item">
+          <div class="pr-status-main"><div>
+            <div>${esc(o.personaCode)}${o.personaName ? " — " + esc(o.personaName) : ""}</div>
+            <p class="muted small" style="margin-top:4px">${esc(o.observation)}</p>
+            ${renderEvidenceList(o.evidence)}
+          </div></div>
+          <div class="pr-status-side">${outlierLink(o.personaCode)}</div>
+        </div>`).join("")}</div>` : ""}
+      ${a.reactionPatterns.length ? `<div class="section-title">Padrões de reações</div>${cardsGrid(a.reactionPatterns, (r) => `<div class="card"><div class="qstat-title">${esc(r.reactionCode)}</div><p class="muted small">${esc(r.observation)}</p>${renderEvidenceList(r.evidence)}</div>`)}` : ""}
+      ${a.qualitativePatterns.length ? `<div class="section-title">Padrões qualitativos</div>${cardsGrid(a.qualitativePatterns, (q) => `<div class="card">${q.questionId ? `<div class="faint small mono">${esc(q.questionId)}</div>` : ""}<p class="muted small">${esc(q.pattern)}</p>${renderEvidenceList(q.evidence)}</div>`)}` : ""}
+      ${a.interestingContradictions.length ? `<div class="section-title">Contradições interessantes</div>${cardsGrid(a.interestingContradictions, (c) => `<div class="card"><p class="muted small">${esc(c.observation)}</p>${c.interpretation ? `<p class="faint small"><i>${esc(c.interpretation)}</i></p>` : ""}${renderEvidenceList(c.evidence)}</div>`)}` : ""}
+      ${a.investigationPoints.length ? `<div class="section-title">Pontos de investigação</div>${cardsGrid(a.investigationPoints, (p) => `<div class="card"><div class="qstat-title">${esc(p.title)}</div><p class="muted small">${esc(p.hypothesis)}</p>${p.whyInvestigate ? `<p class="faint small">${esc(p.whyInvestigate)}</p>` : ""}<div style="margin:6px 0">${confidenceBadge(p.confidence)}</div>${renderEvidenceList(p.evidence)}</div>`)}` : ""}
+      ${a.limitations.length ? `<div class="section-title">Limitações</div><div class="card" style="margin-bottom:18px"><ul style="margin:0;padding-left:20px">${a.limitations.map((l) => `<li class="muted small">${esc(l)}</li>`).join("")}</ul></div>` : ""}
+      <details class="card">
+        <summary style="cursor:pointer;font-weight:650">Ver JSON da análise</summary>
+        <div class="toolbar" style="margin:10px 0 0">
+          <button type="button" class="btn btn-sm" id="analysis-copy-json">Copiar JSON</button>
+          <button type="button" class="btn btn-sm" id="analysis-download-json">Baixar JSON</button>
+        </div>
+      </details>`}`;
+  };
+
+  const renderAnaliseTab = () => {
+    const list = S.getAnalysisRunsForPopulationRun(popRun.id);
+    const cfg = getLLMConfig();
+    const willUseDemo = !cfg.endpoint;
+    const selected = list.find((a) => a.id === selectedAnalysisId) || list[0] || null;
+    return `
+      <div class="card" style="margin-bottom:16px">
+        <p class="muted small">O Research Analyst interpreta, com IA, os dados já produzidos por esta execução — ele não participa da leitura nem recalcula estatísticas: todos os números vêm do ReaderLab. Cada geração cria uma nova análise no histórico (nunca sobrescreve as anteriores).</p>
+        ${willUseDemo ? `<div class="info-box warn" style="margin-top:10px"><span>⚠</span><span>Backend LLM não configurado — esta análise usará o simulador local (modo demo, sem chamada de rede real).</span></div>` : ""}
+        <p class="hint" style="margin-top:10px">Provider/modelo que será utilizado: <span class="mono">${willUseDemo ? "demo-local / demo-analyst-v1" : esc(cfg.provider) + " / " + esc(cfg.model)}</span></p>
+        <div class="toolbar" style="margin-top:12px">
+          <button type="button" class="btn btn-primary" id="analysis-generate" ${analysisRunning ? "disabled" : ""}>${analysisRunning ? "Gerando análise…" : list.length ? "Gerar nova análise com IA" : "Gerar análise com IA"}</button>
+        </div>
+      </div>
+      ${list.length ? `
+      <div class="section-title">Histórico de análises</div>
+      <div class="pr-status-list" style="margin-bottom:18px">
+        ${list.map((a) => `
+          <div class="pr-status-item">
+            <div class="pr-status-main"><div>
+              <div>${esc(a.provider)} / ${esc(a.model)} <span class="faint small">· prompt ${esc(a.promptVersion)}</span></div>
+              <div class="faint small">${fmtDate(a.createdAt)}</div>
+            </div></div>
+            <div class="pr-status-side">
+              <span class="badge ${a.status === "COMPLETED" ? "ok" : a.status === "FAILED" ? "bad" : "accent"}">${esc(D.ANALYSIS_RUN_STATUS[a.status] || a.status)}</span>
+              <button type="button" class="btn btn-sm ${selected && selected.id === a.id ? "btn-primary" : ""}" data-analysis-open="${a.id}">Abrir</button>
+            </div>
+          </div>`).join("")}
+      </div>` : ""}
+      ${selected ? renderAnalysisReport(selected) : (!analysisRunning ? `<div class="empty-state"><div class="big">Nenhuma análise gerada ainda</div><p>Clique em "Gerar análise com IA" para que o Research Analyst interprete os resultados desta execução.</p></div>` : "")}`;
+  };
+
   const renderTabContent = () => {
     if (activeTab === "resumo") {
       return `
@@ -1890,6 +1952,7 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
     if (activeTab === "heatmap") return renderHeatmapTab();
     if (activeTab === "reacoes") return renderReacoesTab();
     if (activeTab === "segmentos") return renderSegmentosTab();
+    if (activeTab === "analise") return renderAnaliseTab();
     if (activeTab === "leitores") {
       return `
         <div class="pr-status-list">
@@ -2049,6 +2112,37 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
         toast("Preset salvo nesta sessão (não persistido).", "ok");
         renderAll();
       });
+    }
+
+    if (activeTab === "analise") {
+      main.querySelector("#analysis-generate")?.addEventListener("click", async () => {
+        if (analysisRunning) return;
+        analysisRunning = true;
+        renderAll();
+        const cfg = getLLMConfig();
+        const mode = cfg.endpoint ? "llm" : "demo";
+        const liveCfg = mode === "llm" ? cfg : null;
+        const { ok, analysisRun } = await runPopulationAnalysis(popRun, { mode, liveCfg, segments: activeSegmentsForAnalysis() });
+        analysisRunning = false;
+        selectedAnalysisId = analysisRun.id;
+        if (ok) toast("Análise gerada com sucesso.", "ok");
+        else toast("Falha ao gerar análise: " + (analysisRun.errorMessage || "erro desconhecido"), "bad");
+        renderAll();
+      });
+      $$("[data-analysis-open]", main).forEach((b) => b.addEventListener("click", () => {
+        selectedAnalysisId = b.dataset.analysisOpen;
+        renderAll();
+      }));
+      const list = S.getAnalysisRunsForPopulationRun(popRun.id);
+      const selected = list.find((a) => a.id === selectedAnalysisId) || list[0] || null;
+      if (selected) {
+        main.querySelector("#analysis-copy-json")?.addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(JSON.stringify(selected, null, 2)); toast("JSON copiado", "ok"); }
+          catch { toast("Não foi possível copiar", "bad"); }
+        });
+        main.querySelector("#analysis-download-json")?.addEventListener("click", () =>
+          download(`readerlab-analysis-${selected.id}.json`, JSON.stringify(selected, null, 2)));
+      }
     }
   };
 

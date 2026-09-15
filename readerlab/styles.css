@@ -327,6 +327,10 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .radio-row input { width: auto; }
 .pop-members { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
+/* ============ Análise (Research Analyst) ============ */
+.evidence-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.evidence-list li { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
 /* ============ Segmentos (PopulationRun) ============ */
 .rule-builder { border: 1px solid var(--line-soft); border-radius: 9px; padding: 12px; margin-top: 10px; }
 .rule-builder-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }

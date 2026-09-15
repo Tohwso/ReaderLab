@@ -338,6 +338,39 @@ export function buildPopulationExecutionSnapshot({ population, personas, survey,
   });
 }
 
+// ------------------------------------------------------- AnalysisRun (Research Analyst)
+// Uma AnalysisRun representa UMA interpretação, por IA, dos resultados JÁ
+// produzidos por uma PopulationRun (ver js/analysisEngine.js). Ela NUNCA lê
+// nem altera ReadingRuns/ReadingResults — apenas interpreta um dataset
+// determinístico (agregados/estatísticas já calculados pelo ReaderLab, ver
+// js/analytics/populationAnalysisDatasetBuilder.js). Cada geração cria uma
+// nova AnalysisRun (histórico completo, nunca sobrescrito).
+export const ANALYSIS_RUN_STATUS = {
+  PENDING: "Pendente",
+  RUNNING: "Executando",
+  COMPLETED: "Concluída",
+  FAILED: "Falhou",
+};
+
+export function blankAnalysisRun() {
+  const t = nowISO();
+  return {
+    id: uid("ares"),
+    populationRunId: "",
+    provider: "",
+    model: "",
+    promptVersion: "",
+    status: "PENDING", // PENDING | RUNNING | COMPLETED | FAILED
+    createdAt: t,
+    startedAt: null,
+    completedAt: null,
+    errorMessage: "",
+    analysisJson: null, // saída da LLM já validada (ver llm/researchAnalystValidate.js)
+    executionSnapshot: null, // dataset determinístico usado nesta análise (nunca o texto/manuscrito)
+    requestMetadata: null,
+  };
+}
+
 // ============================================ Personas de exemplo (seed)
 // Leitores sintéticos de exemplo: população deliberadamente heterogênea,
 // com contradições psicologicamente plausíveis. Mapeados exclusivamente por
