@@ -1349,6 +1349,9 @@ function renderPopulationRunHub(main, popRun) {
 
   let activeTab = "resumo";
   let heatmapSort = { by: "code", dir: "asc" };
+  let reactionsSort = { by: "freq", dir: "desc" };
+  let reactionsShowZero = false;
+  let openReactionCodes = new Set();
 
   // Colunas dinâmicas: perguntas quantitativas (scale/number) da Survey
   // congelada no snapshot — nunca por nome fixo.
@@ -1430,6 +1433,118 @@ function renderPopulationRunHub(main, popRun) {
       <div class="heatmap-detail" id="heatmap-detail" hidden></div>`;
   };
 
+  // Só agrega reaction_code presentes no snapshot desta execução — reações
+  // criadas/renomeadas depois não contaminam o histórico.
+  const computeReactionStats = () => {
+    const snapshotReactions = popRun.executionSnapshot?.reactions || [];
+    const validEntries = runs
+      .filter((r) => r.status === "COMPLETED")
+      .map((r) => ({ run: r, result: S.getResultForRun(r.id) }))
+      .filter((x) => x.result);
+    const validCount = validEntries.length;
+    const stats = snapshotReactions.map((def) => {
+      const matches = validEntries
+        .map(({ run, result }) => {
+          const rr = result.reactions.find((x) => x.reactionCode === def.code);
+          if (!rr) return null;
+          const persona = snapshotPersonas.find((p) => p.id === run.personaId);
+          return { run, rr, persona };
+        })
+        .filter(Boolean);
+      const intensities = def.intensityEnabled ? matches.map((m) => m.rr.intensity).filter((v) => typeof v === "number") : [];
+      const count = matches.length;
+      return {
+        def, matches, count,
+        pct: validCount ? Math.round((count / validCount) * 100) : 0,
+        avg: intensities.length ? Math.round(intensities.reduce((a, b) => a + b, 0) / intensities.length) : null,
+        min: intensities.length ? Math.min(...intensities) : null,
+        max: intensities.length ? Math.max(...intensities) : null,
+      };
+    });
+    return { validCount, stats };
+  };
+
+  const renderReactionDrilldown = (s) => {
+    if (!s.matches.length) return `<p class="faint small" style="padding:0 2px">Nenhum leitor registrou esta reação.</p>`;
+    return `
+      <div class="pr-status-list">
+        ${s.matches.map(({ run, rr, persona }) => `
+          <div class="pr-status-item">
+            <div class="pr-status-main">
+              <div>
+                <div>${esc(persona?.code ? persona.code + " — " : "")}${esc(persona?.name || "(persona removida)")}</div>
+                ${rr.intensity != null ? `<div class="mono small faint">${rr.intensity} / 100</div>` : ""}
+                ${rr.reason ? `<p class="muted small" style="margin-top:4px">${esc(rr.reason)}</p>` : ""}
+              </div>
+            </div>
+            <div class="pr-status-side">
+              <a class="btn btn-sm" href="#/execucoes/${run.id}">Ver relatório individual</a>
+            </div>
+          </div>`).join("")}
+      </div>`;
+  };
+
+  const renderReacoesTab = () => {
+    const snapshotReactions = popRun.executionSnapshot?.reactions || [];
+    if (!snapshotReactions.length) {
+      return `<div class="empty-state"><div class="big">Sem reações no snapshot</div><p>Esta execução não tinha reações configuradas.</p></div>`;
+    }
+    const { validCount, stats } = computeReactionStats();
+    let list = reactionsShowZero ? stats : stats.filter((s) => s.count > 0);
+    const mul = reactionsSort.dir === "desc" ? -1 : 1;
+    list = [...list].sort((a, b) => {
+      if (reactionsSort.by === "nome") return a.def.name.localeCompare(b.def.name, "pt-BR") * mul;
+      if (reactionsSort.by === "intensidade") {
+        if (a.avg == null && b.avg == null) return 0;
+        if (a.avg == null) return 1;
+        if (b.avg == null) return -1;
+        return (a.avg - b.avg) * mul;
+      }
+      return (a.count - b.count) * mul;
+    });
+    return `
+      <div class="heatmap-toolbar">
+        <label class="hint" for="reac-sort-by">Ordenar por</label>
+        <select id="reac-sort-by">
+          <option value="freq" ${reactionsSort.by === "freq" ? "selected" : ""}>Frequência</option>
+          <option value="intensidade" ${reactionsSort.by === "intensidade" ? "selected" : ""}>Intensidade média</option>
+          <option value="nome" ${reactionsSort.by === "nome" ? "selected" : ""}>Nome</option>
+        </select>
+        <button type="button" class="btn btn-sm" id="reac-sort-dir">${reactionsSort.dir === "asc" ? "↑ Crescente" : "↓ Decrescente"}</button>
+        <label class="checkbox-row" style="padding-left:0;margin-left:auto">
+          <input type="checkbox" id="reac-show-zero" ${reactionsShowZero ? "checked" : ""}> Mostrar reações sem ocorrência
+        </label>
+      </div>
+      ${!list.length
+        ? `<div class="empty-state"><div class="big">Nenhuma reação registrada</div><p>Marque "Mostrar reações sem ocorrência" para ver a lista completa.</p></div>`
+        : `<div class="pr-status-list">
+            ${list.map((s) => {
+              const open = openReactionCodes.has(s.def.code);
+              return `
+              <div class="pr-status-item" style="flex-direction:column;align-items:stretch;gap:8px">
+                <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+                  <span class="reaction-dot" style="background:${esc(s.def.color)}"></span>
+                  <b>${esc(s.def.name)}</b>
+                  <span class="mono faint small">${esc(s.def.code)}</span>
+                  ${reactionPolarityBadge(s.def.polarity)}
+                  <span class="mono small" style="margin-left:auto">${s.count} / ${validCount}</span>
+                  <span class="badge neutral">${s.pct}%</span>
+                </div>
+                ${s.def.intensityEnabled && s.avg != null ? `
+                <div class="q-meta">
+                  <span class="hint">Intensidade média: <b class="mono">${s.avg}</b></span>
+                  <span class="hint">mín: <b class="mono">${s.min}</b></span>
+                  <span class="hint">máx: <b class="mono">${s.max}</b></span>
+                </div>` : ""}
+                <div>
+                  <button type="button" class="btn btn-sm btn-ghost" data-toggle-reaction="${esc(s.def.code)}">${open ? "Ocultar leitores" : `Ver leitores (${s.count})`}</button>
+                </div>
+                ${open ? renderReactionDrilldown(s) : ""}
+              </div>`;
+            }).join("")}
+          </div>`}`;
+  };
+
   const renderTabContent = () => {
     if (activeTab === "resumo") {
       return `
@@ -1446,6 +1561,7 @@ function renderPopulationRunHub(main, popRun) {
         <p class="faint small" style="margin-top:14px">Estatísticas agregadas (divergência entre leitores, heatmap de reações, respostas por pergunta) chegam em uma próxima etapa.</p>`;
     }
     if (activeTab === "heatmap") return renderHeatmapTab();
+    if (activeTab === "reacoes") return renderReacoesTab();
     if (activeTab === "leitores") {
       return `
         <div class="pr-status-list">
@@ -1537,6 +1653,27 @@ function renderPopulationRunHub(main, popRun) {
           <div class="heatmap-detail-persona">${esc(cell.dataset.persona)}</div>
           <div class="heatmap-detail-question">${esc(cell.dataset.question)}</div>
           <div class="heatmap-detail-value">${esc(cell.dataset.value)} / ${esc(cell.dataset.max)}</div>`;
+      }));
+    }
+
+    if (activeTab === "reacoes") {
+      main.querySelector("#reac-sort-by")?.addEventListener("change", (e) => {
+        reactionsSort.by = e.target.value;
+        renderAll();
+      });
+      main.querySelector("#reac-sort-dir")?.addEventListener("click", () => {
+        reactionsSort.dir = reactionsSort.dir === "asc" ? "desc" : "asc";
+        renderAll();
+      });
+      main.querySelector("#reac-show-zero")?.addEventListener("change", (e) => {
+        reactionsShowZero = e.target.checked;
+        renderAll();
+      });
+      $$("[data-toggle-reaction]", main).forEach((b) => b.addEventListener("click", () => {
+        const code = b.dataset.toggleReaction;
+        if (openReactionCodes.has(code)) openReactionCodes.delete(code);
+        else openReactionCodes.add(code);
+        renderAll();
       }));
     }
   };
