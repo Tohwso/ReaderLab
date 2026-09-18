@@ -6,12 +6,16 @@
 // LLM — model/base URL/API key nunca vêm do frontend.
 //
 // Contrato de entrada: { systemPrompt: string, userPrompt: string, reasoning_effort?: string, max_completion_tokens?: number }
-// Contrato de saída:   { content: string, model: string, usage?: {...} }
+// Contrato de saída:   { content: string, model: string, structuredOutputMode: string, usage?: {...} }
 //
 // Segredos (definir com `supabase secrets set ...`, nunca no código):
 //   LLM_API_KEY               — obrigatório, API key do provedor de LLM.
 //   LLM_API_BASE_URL          — ex.: "https://api.moonshot.ai/v1". Default: OpenAI.
 //   LLM_MODEL                 — modelo usado nas execuções. Default: gpt-4o-mini.
+//   LLM_RESPONSE_FORMAT_MODE  — "json_object" (default) ou "off". Controla se
+//                               response_format é enviado ao upstream (ver
+//                               JSON Mode abaixo) — só desligar se o provider
+//                               configurado não suportar o parâmetro.
 //   READERLAB_OWNER_USER_ID   — obrigatório. UUID (auth.uid()) do único
 //                               usuário autorizado a executar leituras
 //                               nesta fase single-user.
@@ -38,6 +42,19 @@ const MAX_BODY_BYTES = 2_000_000; // 2MB — bem acima do necessário, só evita
 // Limite superior de sanidade para max_completion_tokens vindo do frontend —
 // nunca confiar cegamente num número arbitrário do chamador.
 const MAX_COMPLETION_TOKENS_CEILING = 1_048_576;
+
+// JSON Mode (response_format: {type: "json_object"}) — suportado tanto pela
+// API padrão da OpenAI (DEFAULT_MODEL) quanto pelo Kimi K3 (ver docs da Kimi
+// API, seção "JSON Mode"). É o mecanismo MAIS RESTRITIVO confiável hoje:
+// "json_schema" (Structured Output) existe na Kimi API, mas usa um dialeto
+// próprio (MFJS) com problemas de validação documentados publicamente pelo
+// próprio provedor — não usado aqui para não trocar um INVALID_RESPONSE por
+// um 400 do upstream. Nunca inventamos um parâmetro não documentado: só
+// enviamos response_format quando LLM_RESPONSE_FORMAT_MODE não for "off"
+// (permite desligar por env var se um operador trocar para um provider que
+// não suporte o parâmetro). Ver requestMetadata.structuredOutputMode no
+// frontend (js/engine.js) para observabilidade.
+const LLM_RESPONSE_FORMAT_MODE = (Deno.env.get("LLM_RESPONSE_FORMAT_MODE") || "json_object").trim();
 
 function json(body: unknown, status: number, headers: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -174,6 +191,11 @@ Deno.serve(async (req: Request) => {
   if (!isKimiK3) payload.temperature = 0.7;
   if (isKimiK3) payload.reasoning_effort = reasoningEffort;
   if (maxCompletionTokens) payload.max_completion_tokens = maxCompletionTokens;
+  if (LLM_RESPONSE_FORMAT_MODE === "json_object") payload.response_format = { type: "json_object" };
+  // Rótulo de observabilidade persistido pelo frontend (nunca afeta o
+  // comportamento da chamada em si) — reflete exatamente o que foi enviado
+  // acima, nunca um valor assumido.
+  const structuredOutputMode = payload.response_format ? "json_mode" : "prompt_only";
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -245,6 +267,6 @@ Deno.serve(async (req: Request) => {
       }
     : undefined;
 
-  return json({ content, model, ...(usage ? { usage } : {}) }, 200, cors);
+  return json({ content, model, structuredOutputMode, ...(usage ? { usage } : {}) }, 200, cors);
 });
 

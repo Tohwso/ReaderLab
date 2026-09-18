@@ -24,15 +24,22 @@ REAÇÕES:
 Nem toda categoria de reação precisa ocorrer.
 Registre somente reações realmente provocadas pelo texto.
 "reactions": [] é uma resposta perfeitamente válida.
+"reaction_code" deve ser EXATAMENTE um dos códigos ativos listados na seção TAXONOMIA DE REAÇÕES ATIVAS — nunca invente um código novo.
+"intensity" é obrigatório quando a reação tiver intensidade habilitada, e deve ser omitido quando não tiver.
 
 PESQUISA:
 Responda à pesquisa de maneira coerente com sua experiência de leitura, respeitando os tipos e limites de cada pergunta.
+Use exatamente os question_ids fornecidos na seção PESQUISA A RESPONDER — nunca modifique um id, nunca adicione sufixos, nunca crie question_ids novos.
+Responda cada question_id no máximo uma vez.
+Não responda perguntas inexistentes.
+Se uma pergunta NÃO for obrigatória e você não tiver uma resposta para ela, OMITA a entrada em "survey_answers" — nunca envie {"question_id": "...", "value": null}. Perguntas obrigatórias devem sempre ser respondidas.
 
 CONCISÃO:
 Seja direto e objetivo em todos os campos de texto. Evite repetições, floreios e explicações desnecessárias. Respeite os limites de itens indicados no schema de saída.
 
 FORMATO DE SAÍDA:
-Responda EXCLUSIVAMENTE com um único objeto JSON válido, seguindo o schema fornecido. Nenhum texto fora do JSON.`;
+Responda EXCLUSIVAMENTE com um único objeto JSON válido, seguindo o schema fornecido. Nenhum texto fora do JSON.
+Retorne apenas o JSON bruto (raw JSON only). Não use Markdown. Não envolva o JSON em blocos de código (não use \`\`\`json nem \`\`\`).`;
 
 const section = (title) => `\n===== ${title} =====\n`;
 
@@ -91,8 +98,10 @@ function formatSurvey(survey) {
   }).join("\n");
 }
 
-function formatOutputSchema(survey) {
+function formatOutputSchema(survey, reactions) {
   const exampleQuestionId = survey.questions[0] ? survey.questions[0].id : "<question_id>";
+  const questionIds = survey.questions.map((q) => q.id);
+  const reactionCodes = reactions.map((r) => r.code);
   return `{
   "reactions": [
     { "reaction_code": "<CODE de reação ativa>", "intensity": <0-100, somente se a reação permitir intensidade>, "reason": "<motivo em 1 frase curta>" }
@@ -105,8 +114,10 @@ function formatOutputSchema(survey) {
 }
 
 Observações:
-- "intensity" só deve aparecer para reações com intensidade habilitada (0–100).
-- Em "survey_answers", use os ids de pergunta listados na seção PESQUISA.
+- "reaction_code" DEVE ser exatamente um destes (nunca outro): [${reactionCodes.join(", ")}]
+- "intensity" só deve aparecer para reações com intensidade habilitada (0–100); omita para as demais.
+- "question_id" DEVE ser exatamente um destes (nunca outro, nunca modificado): [${questionIds.join(", ")}]
+- Pergunta opcional sem resposta: OMITA a entrada em "survey_answers" (nunca envie value: null).
 - "reader_state" é opcional nesta fase.
 
 Limites de tamanho (obrigatórios — respostas mais longas serão cortadas):
@@ -139,7 +150,7 @@ export function buildReadingPrompt({ persona, attributes, reactions, survey, tex
     section("PESQUISA A RESPONDER") +
       `${survey.name}\n${formatSurvey(survey)}`,
     section("SCHEMA DE SAÍDA (responda APENAS este JSON)") +
-      formatOutputSchema(survey),
+      formatOutputSchema(survey, reactions),
   );
 
   return { system: SYSTEM_INSTRUCTION, user: sections.join("\n"), promptVersion: "v1" };

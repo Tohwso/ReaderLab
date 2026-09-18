@@ -157,7 +157,7 @@ export class KimiProvider {
     if (!content || !content.trim()) {
       throw new ProviderError("EMPTY", "O modelo retornou uma resposta vazia.", { errorType: LLM_ERROR_TYPES.SERVER_ERROR });
     }
-    return { content: content.trim(), model: data.model, usage: data.usage };
+    return { content: content.trim(), model: data.model, usage: data.usage, structuredOutputMode: data.structuredOutputMode };
   }
 }
 

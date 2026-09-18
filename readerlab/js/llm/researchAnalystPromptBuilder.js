@@ -120,7 +120,7 @@ Persona individual (ver "individualResults") — referencia OU uma métrica OU u
 Segmento configurado (ver "segments"):
   { "type": "segment", "segmentId": "<nome do segmento>", "metricId": "<questionId>", "field": "n|mean|median|minimum|maximum|standardDeviation|divergence", "value": <valor igual ao do dataset> }
 
-Resposta qualitativa (ver "qualitativeAnswers") — apenas confirma que a Persona respondeu, sem valor numérico:
+Resposta qualitativa (ver "qualitativeQuestions") — apenas confirma que a Persona respondeu, sem valor numérico:
   { "type": "qualitative", "questionId": "<questionId>", "personaCode": "<code>" }
 
 Observações:

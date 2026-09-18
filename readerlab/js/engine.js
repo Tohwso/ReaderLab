@@ -9,6 +9,7 @@ import * as D from "./domain.js";
 import { getProvider, getLLMConfig, ProviderError, providerErrorMessage } from "./llm/provider.js";
 import { buildReadingPrompt } from "./llm/promptBuilder.js";
 import { validateLLMResponse } from "./llm/validate.js";
+import { normalizeReadingResultResponse } from "./llm/readingResultNormalizer.js";
 import { DemoProvider } from "./llm/demoProvider.js";
 import { runWithRetry } from "./llm/retry.js";
 import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
@@ -105,7 +106,7 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     // um next_retry_at persistido (nunca um setTimeout como única fonte de
     // verdade) — nunca vira FAILED só por causa de um 429/503 isolado
     // (critério de aceite desta funcionalidade).
-    const { content, model, usage } = await runWithRetry(
+    const { content, model, usage, structuredOutputMode } = await runWithRetry(
       guardedCall,
       {
         startAttempt: (run.attemptCount || 0) + 1,
@@ -154,14 +155,36 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     // ou nomenclatura equivalente do backend) — nunca disponível em demo.
     // Persistido para observabilidade/otimização futura (ver requestMetadata).
     if (usage) run.requestMetadata = { ...run.requestMetadata, tokenUsage: usage };
+    // Mecanismo de contrato de saída efetivamente usado nesta chamada (ver
+    // supabase/functions/llm-proxy — "json_mode" | "prompt_only"), decidido
+    // pelo servidor, nunca pelo frontend. Permite comparar taxas de
+    // INVALID_RESPONSE por modo (nunca disponível em demo).
+    if (structuredOutputMode) run.requestMetadata = { ...run.requestMetadata, structuredOutputMode };
+
+    // Etapa explícita raw -> normalization -> JSON.parse -> schema ->
+    // semântica (ver llm/readingResultNormalizer.js). `run.rawResponse`
+    // acima NUNCA é substituído pelo texto normalizado — só o texto usado
+    // para o parse é que muda. Desvios mecânicos (ex.: fences Markdown)
+    // viram warning; texto explicativo significativo em volta do JSON
+    // continua quebrando o JSON.parse normalmente (INVALID_RESPONSE).
+    const { normalizedText, warnings: normalizationWarnings } = normalizeReadingResultResponse(content);
+    if (normalizationWarnings.length) {
+      run.requestMetadata = { ...run.requestMetadata, normalizationWarnings };
+    }
 
     let parsed;
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(normalizedText);
     } catch (_) {
       throw new ProviderError("INVALID_JSON", "O modelo retornou um JSON inválido.", { errorType: LLM_ERROR_TYPES.INVALID_RESPONSE });
     }
     const validation = validateLLMResponse(parsed, { reactions: activeReactions, survey });
+    // Metadata de completude da pesquisa (ver validate.js): calculada e
+    // persistida mesmo quando a validação falha — observabilidade sobre
+    // required/optional respondidos não depende da resposta ser aceita.
+    if (validation.surveyCompleteness) {
+      run.requestMetadata = { ...run.requestMetadata, surveyCompleteness: validation.surveyCompleteness };
+    }
     if (!validation.ok) {
       throw new ProviderError("INVALID_SCHEMA", "Resposta fora do schema: " + validation.errors.join(" | "), { errorType: LLM_ERROR_TYPES.INVALID_RESPONSE });
     }
@@ -169,7 +192,8 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     run.status = "COMPLETED";
     run.completedAt = D.nowISO();
     await S.saveRun(run);
-    await S.saveResult({ ...D.blankResult(run.id), ...validation.value });
+    const validationWarnings = [...normalizationWarnings, ...(validation.warnings || [])];
+    await S.saveResult({ ...D.blankResult(run.id), ...validation.value, validationWarnings });
     return { ok: true, run };
   } catch (err) {
     if (err?.cancelled) {

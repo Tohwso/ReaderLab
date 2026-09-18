@@ -13,6 +13,11 @@ const MAX_READER_STATE_LIST = 5; // confusions / predictions
 
 export function validateLLMResponse(parsed, { reactions, survey }) {
   const errors = [];
+  // Desvios tolerados sem invalidar a resposta inteira (ver critérios 6/7
+  // do pedido original): id de pergunta desconhecido com value===null, e
+  // reação conhecida porém estruturalmente incompleta (ex.: sem intensity
+  // obrigatória) — ambos viram warning + item descartado, não INVALID_RESPONSE.
+  const warnings = [];
   const reactionByCode = new Map(reactions.map((r) => [r.code, r]));
   const questionById = new Map(survey.questions.map((q) => [q.id, q]));
   const clean = { reactions: [], surveyAnswers: [], spontaneousNotes: [], readerState: null };
@@ -29,7 +34,9 @@ export function validateLLMResponse(parsed, { reactions, survey }) {
       if (def.intensityEnabled) {
         const n = Number(r.intensity);
         if (!Number.isFinite(n) || n < 0 || n > 100) {
-          errors.push(`Intensidade inválida para ${code} (esperado 0–100).`);
+          // Reação conhecida, mas estruturalmente inválida (ex.: sem
+          // intensity) — descarta só esta reação, preserva o restante.
+          warnings.push(`Dropped malformed reaction (invalid/missing intensity): ${code}.`);
           continue;
         }
         intensity = Math.round(n);
@@ -44,12 +51,36 @@ export function validateLLMResponse(parsed, { reactions, survey }) {
   }
 
   // ------------------------------------------------------- survey_answers
+  // Correspondência determinística com a Survey do snapshot: cada
+  // questionId conhecido no máximo uma vez (nunca "primeira/última vence" —
+  // duplicata é sinal de resposta inconsistente e invalida a resposta),
+  // nunca persiste um id desconhecido, e perguntas obrigatórias ausentes
+  // invalidam a resposta (opcionais ausentes são apenas... ausentes, nunca
+  // preenchidas artificialmente com null/0/"").
+  const seenQuestionIds = new Set();
   if (!Array.isArray(parsed.survey_answers)) {
     errors.push('"survey_answers" deve ser uma lista.');
   } else {
     for (const a of parsed.survey_answers) {
-      const q = a && questionById.get(a.question_id);
-      if (!q) { errors.push(`ID de pergunta desconhecido: "${a && a.question_id}".`); continue; }
+      const qid = a && a.question_id;
+      const q = questionById.get(qid);
+      if (!q) {
+        // ID desconhecido com value===null: provável alucinação inofensiva
+        // da LLM (ex.: "qst_x_extra") — descarta com warning em vez de
+        // invalidar toda a ReadingRun. Valor não-nulo continua erro (não
+        // aceitamos conteúdo inventado silenciosamente).
+        if (a && a.value === null) {
+          warnings.push(`Dropped unknown null survey answer: ${qid}`);
+        } else {
+          errors.push(`ID de pergunta desconhecido: "${qid}".`);
+        }
+        continue;
+      }
+      if (seenQuestionIds.has(qid)) {
+        errors.push(`Duplicate survey answer for questionId: ${qid}`);
+        continue;
+      }
+      seenQuestionIds.add(qid);
       const v = a.value;
       const label = `"${q.text.slice(0, 50)}${q.text.length > 50 ? "…" : ""}"`;
       switch (q.type) {
@@ -82,7 +113,26 @@ export function validateLLMResponse(parsed, { reactions, survey }) {
           clean.surveyAnswers.push({ questionId: q.id, value: v });
       }
     }
+    // Obrigatória e ausente (nunca vista em survey_answers) invalida a
+    // resposta; opcional ausente é permitida — nunca preenchida artificialmente.
+    for (const q of survey.questions) {
+      if (q.required && !seenQuestionIds.has(q.id)) {
+        errors.push(`Resposta obrigatória ausente: "${q.text.slice(0, 50)}${q.text.length > 50 ? "…" : ""}".`);
+      }
+    }
   }
+
+  // -------------------------------------------------- completude (metadata)
+  // Observabilidade sem invalidar perguntas opcionais ausentes (ver
+  // requestMetadata em engine.js) — calculado sobre as respostas
+  // efetivamente aceitas em clean.surveyAnswers.
+  const answeredIds = new Set(clean.surveyAnswers.map((a) => a.questionId));
+  const surveyCompleteness = {
+    expectedQuestionCount: survey.questions.length,
+    answeredQuestionCount: answeredIds.size,
+    requiredQuestionCount: survey.questions.filter((q) => q.required).length,
+    missingOptionalQuestionIds: survey.questions.filter((q) => !q.required && !answeredIds.has(q.id)).map((q) => q.id),
+  };
 
   // ----------------------------------------------------- spontaneous_notes
   if (parsed.spontaneous_notes != null) {
@@ -110,5 +160,5 @@ export function validateLLMResponse(parsed, { reactions, survey }) {
     }
   }
 
-  return { ok: errors.length === 0, value: clean, errors };
+  return { ok: errors.length === 0, value: clean, errors, warnings, surveyCompleteness };
 }

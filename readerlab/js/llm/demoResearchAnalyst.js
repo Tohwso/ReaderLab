@@ -20,7 +20,10 @@ export class DemoResearchAnalystProvider {
     const consensusMetric = metricsWithData.find((m) => m.divergenceClassification === "Consenso alto");
     const polarizedMetric = [...metricsWithData].sort((a, b) => (b.divergence ?? 0) - (a.divergence ?? 0))[0];
     const topReaction = [...d.reactionAggregates].sort((a, b) => b.readerCount - a.readerCount)[0];
-    const comparison = d.segmentComparisons[0];
+    // segmentComparisons pode ter sido removido pela compactação
+    // determinística do preflight (ver llm/researchAnalystCompaction.js) —
+    // é só uma conveniência derivada de d.segments, nunca dado obrigatório.
+    const comparison = (d.segmentComparisons || [])[0];
     const segA = comparison ? d.segments.find((s) => s.name === comparison.segmentA) : null;
     const segB = comparison ? d.segments.find((s) => s.name === comparison.segmentB) : null;
     const comparisonMetricA = segA ? segA.quantitativeMetrics.find((m) => m.n > 0) : null;

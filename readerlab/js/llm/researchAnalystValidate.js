@@ -164,12 +164,19 @@ function validateSchema(parsed) {
 // dataset, então é exatamente contra ele que citações são verificadas).
 function buildDatasetIndex(dataset) {
   const d = dataset || {};
+  // v2 renomeia qualitativeAnswers -> qualitativeQuestions (ver
+  // populationAnalysisDatasetBuilder.js); qualitativeAnswers só existe em
+  // datasets version:1 (comparação/teste), nunca gerado por padrão.
+  const qualitativeSource = d.qualitativeQuestions || d.qualitativeAnswers;
   return {
     metricById: new Map(asArray(d.quantitativeMetrics).map((m) => [String(m.questionId), m])),
     reactionByCode: new Map(asArray(d.reactionAggregates).map((r) => [r.reactionCode, r])),
     personaByCode: new Map(asArray(d.individualResults).map((p) => [p.personaCode, p])),
     segmentByName: new Map(asArray(d.segments).map((s) => [s.name, s])),
-    qualitativeByQuestionId: new Map(asArray(d.qualitativeAnswers).map((q) => [String(q.questionId), q])),
+    qualitativeByQuestionId: new Map(asArray(qualitativeSource).map((q) => [String(q.questionId), q])),
+    // Só existe em datasets version:2 — reasons/intensity de reação vivem
+    // aqui, fora de individualResults/reactionAggregates (ver builder).
+    reactionEntryByPersonaAndCode: new Map(asArray(d.reactionEntries).map((e) => [`${e.personaCode}::${e.reactionCode}`, e])),
   };
 }
 
@@ -206,18 +213,22 @@ function checkEvidence(e, index) {
       const m = index.metricById.get(e.metricId);
       if (!m) return `metricId inexistente no dataset: "${e.metricId}".`;
       if (e.field !== "value") return `field inválido para persona+metric (use "value"): "${e.field}".`;
-      const qa = persona.quantitativeAnswers.find((q) => q.questionText === m.questionText);
-      if (!qa) return `Persona "${e.personaCode}" não respondeu à métrica "${e.metricId}".`;
-      if (!numbersEqual(e.value, qa.value)) return `valor divergente para persona "${e.personaCode}" / metric "${e.metricId}" (dataset=${qa.value}, citado=${e.value}).`;
+      // v2: quantitativeAnswers é um mapa questionId -> value (ver builder).
+      const qaValue = persona.quantitativeAnswers?.[e.metricId];
+      if (qaValue == null) return `Persona "${e.personaCode}" não respondeu à métrica "${e.metricId}".`;
+      if (!numbersEqual(e.value, qaValue)) return `valor divergente para persona "${e.personaCode}" / metric "${e.metricId}" (dataset=${qaValue}, citado=${e.value}).`;
       return null;
     }
     if (e.reactionCode) {
       const r = index.reactionByCode.get(e.reactionCode);
       if (!r) return `reactionCode inexistente no dataset: "${e.reactionCode}".`;
       if (e.field !== "intensity") return `field inválido para persona+reaction (use "intensity"): "${e.field}".`;
-      const pr = persona.reactions.find((x) => x.reactionCode === e.reactionCode);
-      if (!pr) return `Persona "${e.personaCode}" não emitiu a reação "${e.reactionCode}".`;
-      if (pr.intensity == null || !numbersEqual(e.value, pr.intensity)) return `valor divergente para persona "${e.personaCode}" / reação "${e.reactionCode}" (dataset=${pr.intensity}, citado=${e.value}).`;
+      // v2: individualResults só guarda reactionCodes (existência); a
+      // intensidade/reason vivem em reactionEntries (ver builder).
+      if (!asArray(persona.reactionCodes).includes(e.reactionCode)) return `Persona "${e.personaCode}" não emitiu a reação "${e.reactionCode}".`;
+      const entry = index.reactionEntryByPersonaAndCode.get(`${e.personaCode}::${e.reactionCode}`);
+      const intensity = entry ? entry.intensity : null;
+      if (intensity == null || !numbersEqual(e.value, intensity)) return `valor divergente para persona "${e.personaCode}" / reação "${e.reactionCode}" (dataset=${intensity}, citado=${e.value}).`;
       return null;
     }
     return `evidence de persona precisa referenciar metricId ou reactionCode.`;

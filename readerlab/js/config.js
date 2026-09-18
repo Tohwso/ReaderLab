@@ -92,3 +92,27 @@ function fractionOverride(windowKey, fallback) {
   return fallback;
 }
 export const LLM_RATE_LIMIT_SAFETY_FACTOR = fractionOverride("READERLAB_LLM_RATE_LIMIT_SAFETY_FACTOR", 0.8);
+
+// Preflight determinístico de tamanho do prompt do Research Analyst (ver
+// analysisEngine.js + llm/researchAnalystCompaction.js) — o Analyst NUNCA
+// deve descobrir o limite real da Edge Function (EDGE_MAX_USER_PROMPT_CHARS
+// abaixo, espelhando MAX_USER_PROMPT_CHARS em
+// supabase/functions/llm-proxy/index.ts) através de um 413 inesperado.
+// ANALYST_MAX_PROMPT_CHARS fica DELIBERADAMENTE abaixo do limite técnico —
+// nunca aumentar isto como "solução" para datasets grandes; a resposta
+// correta é compactar (ver researchAnalystCompaction.js) ou falhar com
+// ANALYSIS_INPUT_TOO_LARGE.
+export const ANALYST_MAX_PROMPT_CHARS = numberOverride("READERLAB_ANALYST_MAX_PROMPT_CHARS", 150000);
+// Documentação do limite real do backend — NUNCA usado para decidir se uma
+// chamada é permitida (só ANALYST_MAX_PROMPT_CHARS, sempre mais estrito).
+export const EDGE_MAX_USER_PROMPT_CHARS = 200000;
+
+// Amostragem/truncamento determinístico aplicados pela compactação do
+// dataset (ver researchAnalystCompaction.js) quando o prompt excede
+// ANALYST_MAX_PROMPT_CHARS — nunca Math.random, sempre pelas primeiras N
+// entradas ordenadas por personaCode. Também usados como truncamento
+// defensivo padrão do builder (ver populationAnalysisDatasetBuilder.js).
+export const ANALYST_MAX_QUALITATIVE_ANSWERS_PER_QUESTION = numberOverride("READERLAB_ANALYST_MAX_QUALITATIVE_ANSWERS_PER_QUESTION", 20);
+export const ANALYST_MAX_QUALITATIVE_ANSWER_CHARS = numberOverride("READERLAB_ANALYST_MAX_QUALITATIVE_ANSWER_CHARS", 600);
+export const ANALYST_MAX_REACTION_REASON_CHARS = numberOverride("READERLAB_ANALYST_MAX_REACTION_REASON_CHARS", 300);
+export const ANALYST_MAX_REACTION_REASONS_PER_CODE = numberOverride("READERLAB_ANALYST_MAX_REACTION_REASONS_PER_CODE", 20);

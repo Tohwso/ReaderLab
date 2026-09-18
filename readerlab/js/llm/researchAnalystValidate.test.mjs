@@ -36,25 +36,29 @@ function test(name, fn) {
 }
 
 // Dataset determinístico mínimo, no mesmo shape produzido por
-// buildPopulationAnalysisDataset() — o suficiente para exercitar todos os
-// tipos de evidence sem precisar de S.state/store.js/db.js.
+// buildPopulationAnalysisDataset() versão 2 (compacta) — o suficiente para
+// exercitar todos os tipos de evidence sem precisar de S.state/store.js/db.js.
 const dataset = {
+  analysisDatasetVersion: 2,
   quantitativeMetrics: [
     { questionId: "q1", questionText: "Quão envolvente foi a leitura?", n: 3, mean: 74, median: 75, minimum: 60, maximum: 90, standardDeviation: 12.5, divergence: 0.32, divergenceClassification: "Divergência moderada" },
   ],
   reactionAggregates: [
     { reactionCode: "BORING", reactionName: "Tédio", readerCount: 3, validReaderCount: 10, percentage: 30, meanIntensity: 55, minimumIntensity: 40, maximumIntensity: 70 },
   ],
+  reactionEntries: [
+    { personaCode: "R002", reactionCode: "BORING", intensity: 60, reason: "Achei o meio da história arrastado." },
+  ],
   individualResults: [
     {
       personaCode: "R002", personaName: "Leitora Dois",
-      quantitativeAnswers: [{ questionText: "Quão envolvente foi a leitura?", value: 43 }],
-      reactions: [{ reactionCode: "BORING", intensity: 60 }],
+      quantitativeAnswers: { q1: 43 },
+      reactionCodes: ["BORING"],
     },
     {
       personaCode: "R003", personaName: "Leitor Três",
-      quantitativeAnswers: [],
-      reactions: [],
+      quantitativeAnswers: {},
+      reactionCodes: [],
     },
   ],
   segments: [
@@ -63,8 +67,8 @@ const dataset = {
       quantitativeMetrics: [{ questionId: "q1", questionText: "Quão envolvente foi a leitura?", n: 5, mean: 48, median: 50, minimum: 20, maximum: 80, standardDeviation: 15, divergence: 0.4 }],
     },
   ],
-  qualitativeAnswers: [
-    { questionId: "q2", questionText: "O que mais te marcou?", answers: [{ personaCode: "R003", personaName: "Leitor Três", answer: "O final surpreendente." }] },
+  qualitativeQuestions: [
+    { questionId: "q2", questionText: "O que mais te marcou?", answers: [{ personaCode: "R003", value: "O final surpreendente." }] },
   ],
 };
 

@@ -82,6 +82,36 @@ test("G) system prompt instrui concisão explicitamente", () => {
   assert.ok(/CONCIS[ÃA]O/i.test(system));
 });
 
+test("I) system prompt instrui a não duplicar/inventar question_ids", () => {
+  const { system } = buildReadingPrompt({ persona: basePersona(), attributes, reactions, survey, text: "x" });
+  assert.ok(/no m[aá]ximo uma vez/i.test(system));
+  assert.ok(/nunca crie question_ids/i.test(system));
+});
+
+test("J) system prompt proíbe Markdown/fences no output (raw JSON only)", () => {
+  const { system } = buildReadingPrompt({ persona: basePersona(), attributes, reactions, survey, text: "x" });
+  assert.ok(/raw JSON only/i.test(system));
+  assert.ok(/n[ãa]o use markdown/i.test(system));
+  assert.ok(/n[ãa]o envolva o json em blocos de c[oó]digo/i.test(system));
+});
+
+test("K) schema de saída declara enum explícito de reaction_code e question_id (IDs reais, não fabricados)", () => {
+  const { user } = buildReadingPrompt({ persona: basePersona(), attributes, reactions, survey, text: "x" });
+  assert.ok(user.includes("[TENSAO]"));
+  assert.ok(user.includes("[q1]"));
+});
+
+test("L) system prompt instrui a OMITIR pergunta opcional sem resposta (nunca value: null)", () => {
+  const { system } = buildReadingPrompt({ persona: basePersona(), attributes, reactions, survey, text: "x" });
+  assert.ok(/OMITA a entrada/i.test(system));
+  assert.ok(system.includes('value": null'));
+});
+
+test("M) system prompt instrui intensity obrigatória quando habilitada, omitida quando não", () => {
+  const { system } = buildReadingPrompt({ persona: basePersona(), attributes, reactions, survey, text: "x" });
+  assert.ok(/intensity.*obrigat[óo]rio.*habilitada/i.test(system.replace(/\n/g, " ")));
+});
+
 test("H) prompt de uma Persona minimalista (sem tags/instructions/narrativa) é mais enxuto que uma com todos os campos preenchidos", () => {
   const minimal = buildReadingPrompt({ persona: basePersona(), attributes, reactions, survey, text: "x" });
   const full = buildReadingPrompt({

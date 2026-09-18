@@ -8,33 +8,43 @@
 // qualquer segredo — apenas agregados, respostas qualitativas (com
 // truncamento defensivo) e metadados de identificação (código/nome da
 // Persona).
+//
+// analysisDatasetVersion: as seções que variam de forma entre v1 (legado)
+// e v2 (compacto — máxima informação analítica, mínima duplicação) vivem
+// em populationAnalysisDatasetFormat.js (módulo PURO, testável em Node sem
+// depender do client Supabase). v1 permanece disponível (nunca removido)
+// só para comparação/teste (ver populationAnalysisDatasetFormat.test.mjs)
+// e para nunca invalidar o entendimento de AnalysisRuns antigas — que
+// congelam seu próprio dataset em executionSnapshot e NUNCA são
+// reescritas quando este builder muda.
 import * as S from "../store.js";
 import * as D from "../domain.js";
+import { ANALYST_MAX_QUALITATIVE_ANSWER_CHARS, ANALYST_MAX_REACTION_REASON_CHARS } from "../config.js";
 import { computeQuestionStats, computeReactionAggregates, filterPersonasBySegment } from "./populationMetrics.js";
+import {
+  formatReactionAggregatesBase,
+  formatReactionAggregatesV1,
+  formatReactionEntries,
+  formatQualitativeAnswersV1,
+  formatQualitativeQuestionsV2,
+  formatIndividualResultsV1,
+  formatIndividualResultsV2,
+  attributeUnavailableLabel,
+} from "./populationAnalysisDatasetFormat.js";
 
-export const ANALYSIS_DATASET_VERSION = 1;
+export const ANALYSIS_DATASET_VERSION = 2;
+export const LEGACY_ANALYSIS_DATASET_VERSION = 1;
 
-// Rótulo seguro para um attributeId presente em `persona.attributeValues`/
-// regra de segmento mas que não pôde ser resolvido nem pelo snapshot nem
-// pelo fallback legado (ex.: atributo excluído do catálogo atual de uma
-// PopulationRun anterior à snapshotVersion 2). Nunca inventa a definição
-// original — apenas evita quebrar a página, preservando o id bruto.
-const attributeUnavailableLabel = (attributeId) => `Atributo histórico não disponível (${attributeId})`;
-
-const MAX_ANSWER_CHARS = 600; // por resposta qualitativa individual
-const MAX_REASON_CHARS = 300; // por motivo de reação relatado
-
-function truncate(str, max, truncatedKeys, key) {
-  if (typeof str !== "string" || str.length <= max) return str;
-  truncatedKeys.push(key);
-  return str.slice(0, max) + "…";
-}
+const MAX_ANSWER_CHARS = ANALYST_MAX_QUALITATIVE_ANSWER_CHARS; // por resposta qualitativa individual
+const MAX_REASON_CHARS = ANALYST_MAX_REACTION_REASON_CHARS; // por motivo de reação relatado
 
 // Constrói o dataset analítico de uma PopulationRun já finalizada.
 // `segments`: lista opcional de { name, rules } — apenas os segmentos
 // efetivamente configurados pelo usuário na aba "Segmentos" entram no
 // dataset (nunca segmentos inventados/hipotéticos).
-export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
+// `version`: 2 (padrão, compacto) ou 1 (legado — só para comparação/teste;
+// nunca usado para gerar uma AnalysisRun nova por padrão).
+export function buildPopulationAnalysisDataset(popRun, { segments = [], version = ANALYSIS_DATASET_VERSION } = {}) {
   const population = S.state.populations.find((p) => p.id === popRun.populationId);
   const survey = popRun.executionSnapshot?.survey || S.state.surveys.find((s) => s.id === popRun.surveyId);
   const snapshotPersonas = popRun.executionSnapshot?.personas || [];
@@ -75,66 +85,28 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
   const quantitativeMetrics = computeQuestionStats(quantitativeQuestions, runs, snapshotPersonas, getResult).map(toQuantitativeMetric);
 
   const { validCount, stats: reactionStats } = computeReactionAggregates(snapshotReactions, runs, snapshotPersonas, getResult);
-  const reactionAggregates = reactionStats.map((s) => ({
-    reactionCode: s.def.code,
-    reactionName: s.def.name,
-    polarity: s.def.polarity,
-    readerCount: s.count,
-    validReaderCount: validCount,
-    percentage: s.pct,
-    meanIntensity: s.avg,
-    minimumIntensity: s.min,
-    maximumIntensity: s.max,
-    entries: s.matches.map(({ run, rr, persona }) => ({
-      personaCode: persona?.code || null,
-      personaName: persona?.name || "(persona removida)",
-      intensity: rr.intensity,
-      reason: truncate(rr.reason || "", MAX_REASON_CHARS, truncatedFields, `reaction:${s.def.code}:${run.id}`),
-    })),
-  }));
 
-  const qualitativeAnswers = qualitativeQuestions.map((q) => ({
-    questionId: q.id,
-    questionText: q.text,
-    answers: completedRuns.map((r) => {
-      const result = getResult(r.id);
-      const ans = result?.surveyAnswers.find((a) => a.questionId === q.id);
-      if (!ans || ans.value == null || ans.value === "") return null;
-      const persona = snapshotPersonas.find((p) => p.id === r.personaId);
-      const raw = Array.isArray(ans.value) ? ans.value.join(", ") : String(ans.value);
-      return {
-        personaCode: persona?.code || null,
-        personaName: persona?.name || "(persona removida)",
-        answer: truncate(raw, MAX_ANSWER_CHARS, truncatedFields, `qualitative:${q.id}:${r.id}`),
-      };
-    }).filter(Boolean),
-  }));
+  // Pares (persona, result) já resolvidos para as runs concluídas — insumo
+  // comum das seções que variam por versão (ver populationAnalysisDatasetFormat.js).
+  const resolvedRows = completedRuns
+    .map((r) => ({ runId: r.id, persona: snapshotPersonas.find((p) => p.id === r.personaId), result: getResult(r.id) }))
+    .filter((row) => row.persona && row.result);
 
-  const individualResults = completedRuns.map((r) => {
-    const persona = snapshotPersonas.find((p) => p.id === r.personaId);
-    const result = getResult(r.id);
-    if (!persona || !result) return null;
-    const attributes = {};
-    Object.keys(persona.attributeValues || {}).forEach((attrId) => {
-      const attr = attributeById.get(attrId);
-      attributes[attr ? attr.name : attributeUnavailableLabel(attrId)] = persona.attributeValues[attrId];
-    });
-    return {
-      personaCode: persona.code || null,
-      personaName: persona.name,
-      attributes,
-      quantitativeAnswers: quantitativeQuestions.map((q) => ({
-        questionText: q.text,
-        value: result.surveyAnswers.find((a) => a.questionId === q.id)?.value ?? null,
-      })).filter((x) => x.value != null),
-      reactions: result.reactions.map((rr) => ({ reactionCode: rr.reactionCode, intensity: rr.intensity })),
-      qualitativeAnswers: qualitativeQuestions.map((q) => ({
-        questionText: q.text,
-        answer: result.surveyAnswers.find((a) => a.questionId === q.id)?.value ?? null,
-      })).filter((x) => x.answer != null && x.answer !== ""),
-      readerState: result.readerState || null,
-    };
-  }).filter(Boolean);
+  const reactionAggregates = version === 1
+    ? formatReactionAggregatesV1(reactionStats, validCount, { truncatedFields, maxReasonChars: MAX_REASON_CHARS })
+    : formatReactionAggregatesBase(reactionStats, validCount);
+  const reactionEntries = version === 1 ? undefined : formatReactionEntries(reactionStats, { truncatedFields, maxReasonChars: MAX_REASON_CHARS });
+
+  const qualitativeAnswers = version === 1
+    ? formatQualitativeAnswersV1(qualitativeQuestions, resolvedRows, { truncatedFields, maxAnswerChars: MAX_ANSWER_CHARS })
+    : undefined;
+  const qualitativeQuestionsOut = version === 1
+    ? undefined
+    : formatQualitativeQuestionsV2(qualitativeQuestions, resolvedRows, { truncatedFields, maxAnswerChars: MAX_ANSWER_CHARS });
+
+  const individualResults = version === 1
+    ? formatIndividualResultsV1(resolvedRows, { attributeById, quantitativeQuestionDefs: quantitativeQuestions, qualitativeQuestionDefs: qualitativeQuestions })
+    : formatIndividualResultsV2(resolvedRows, { attributeById, quantitativeQuestionDefs: quantitativeQuestions });
 
   const segmentSummaries = segments.map((seg) => {
     const personas = filterPersonasBySegment(snapshotPersonas, seg.rules);
@@ -178,8 +150,8 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
     }
   }
 
-  return {
-    analysisDatasetVersion: ANALYSIS_DATASET_VERSION,
+  const dataset = {
+    analysisDatasetVersion: version,
     populationRun: {
       id: popRun.id,
       title: popRun.title || null,
@@ -197,11 +169,17 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [] } = {}) {
     },
     quantitativeMetrics,
     reactionAggregates,
-    qualitativeAnswers,
     individualResults,
     segments: segmentSummaries,
     segmentComparisons,
     truncatedFields,
     attributeCatalogLegacyFallback, // true só para PopulationRuns anteriores à snapshotVersion 2 (ver domain.js)
   };
+  if (version === 1) {
+    dataset.qualitativeAnswers = qualitativeAnswers;
+  } else {
+    dataset.qualitativeQuestions = qualitativeQuestionsOut;
+    dataset.reactionEntries = reactionEntries;
+  }
+  return dataset;
 }

@@ -2284,5 +2284,6 @@ export function blankResult(readingRunId) {
     surveyAnswers: [],    // [{ questionId, value }] — questionId = id persistente da SurveyQuestion
     spontaneousNotes: [], // string[]
     readerState: null,    // { engagement, curiosity, fatigue, confusions, predictions }
+    validationWarnings: [], // string[] — desvios tolerados (ver llm/readingResultNormalizer.js e llm/validate.js)
   };
 }
