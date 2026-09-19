@@ -108,7 +108,7 @@ function buildDatasetV2() {
     reactionAggregates: formatReactionAggregatesBase(reactionStats, validCount),
     reactionEntries: formatReactionEntries(reactionStats, { truncatedFields, maxReasonChars: 600 }),
     qualitativeQuestions: formatQualitativeQuestionsV2(qualitativeQuestionDefs, resolvedRows, { truncatedFields, maxAnswerChars: 600 }),
-    individualResults: formatIndividualResultsV2(resolvedRows, { attributeById, quantitativeQuestionDefs }),
+    individualResults: formatIndividualResultsV2(resolvedRows, { quantitativeQuestionDefs }),
     segments: [],
     segmentComparisons: [],
     truncatedFields,
@@ -181,23 +181,26 @@ test("individualResults (v2): quantitativeAnswers vira mapa questionId->value eq
   });
 });
 
-test("individualResults (v2): reactionCodes preserva os mesmos códigos de v1.reactions", () => {
-  v1.individualResults.forEach((p1, i) => {
-    const p2 = v2.individualResults[i];
-    assert.deepEqual(p2.reactionCodes, p1.reactions.map((r) => r.reactionCode));
-  });
+test("individualResults (v2): NÃO guarda mais reactionCodes (evidence de reação é resolvida via reactionEntries)", () => {
+  v2.individualResults.forEach((p) => assert.ok(!("reactionCodes" in p)));
 });
 
 test("individualResults (v2): NÃO repete qualitativeAnswers (já existe em qualitativeQuestions)", () => {
   v2.individualResults.forEach((p) => assert.ok(!("qualitativeAnswers" in p)));
 });
 
-test("individualResults: nenhuma persona/atributo perdido entre v1 e v2", () => {
+test("individualResults (v2): NÃO repete personaName/attributes/readerState (já vivem em population.personas/segments/nunca são evidence suportada)", () => {
+  v2.individualResults.forEach((p) => {
+    assert.ok(!("personaName" in p));
+    assert.ok(!("attributes" in p));
+    assert.ok(!("readerState" in p));
+  });
+});
+
+test("individualResults: personaCode e quantitativeAnswers preservados entre v1 e v2", () => {
   assert.equal(v2.individualResults.length, v1.individualResults.length);
   v1.individualResults.forEach((p1, i) => {
     assert.equal(v2.individualResults[i].personaCode, p1.personaCode);
-    assert.deepEqual(v2.individualResults[i].attributes, p1.attributes);
-    assert.deepEqual(v2.individualResults[i].readerState, p1.readerState);
   });
 });
 

@@ -106,7 +106,7 @@ export function buildPopulationAnalysisDataset(popRun, { segments = [], version 
 
   const individualResults = version === 1
     ? formatIndividualResultsV1(resolvedRows, { attributeById, quantitativeQuestionDefs: quantitativeQuestions, qualitativeQuestionDefs: qualitativeQuestions })
-    : formatIndividualResultsV2(resolvedRows, { attributeById, quantitativeQuestionDefs: quantitativeQuestions });
+    : formatIndividualResultsV2(resolvedRows, { quantitativeQuestionDefs: quantitativeQuestions });
 
   const segmentSummaries = segments.map((seg) => {
     const personas = filterPersonasBySegment(snapshotPersonas, seg.rules);

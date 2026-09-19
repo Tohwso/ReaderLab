@@ -50,16 +50,8 @@ const dataset = {
     { personaCode: "R002", reactionCode: "BORING", intensity: 60, reason: "Achei o meio da história arrastado." },
   ],
   individualResults: [
-    {
-      personaCode: "R002", personaName: "Leitora Dois",
-      quantitativeAnswers: { q1: 43 },
-      reactionCodes: ["BORING"],
-    },
-    {
-      personaCode: "R003", personaName: "Leitor Três",
-      quantitativeAnswers: {},
-      reactionCodes: [],
-    },
+    { personaCode: "R002", quantitativeAnswers: { q1: 43 } },
+    { personaCode: "R003", quantitativeAnswers: {} },
   ],
   segments: [
     {
@@ -150,6 +142,14 @@ test("extra) qualitative persona sem resposta naquela pergunta -> FAIL", () => {
 test("extra) persona + reactionCode correto -> PASS", () => {
   const r = evidenceOk("persona", { personaCode: "R002", reactionCode: "BORING", field: "intensity", value: 60 });
   assert.equal(r.ok.ok, true);
+});
+
+// Extra: individualResults v2 não guarda mais reactionCodes — a evidence só
+// é válida se existir uma reactionEntry correspondente no dataset FINAL
+// (nunca inferida a partir de individualResults, ver seção 2 da tarefa).
+test("extra) persona + reactionCode sem reactionEntry correspondente (ex.: removida pela compactação) -> FAIL", () => {
+  const r = evidenceOk("persona", { personaCode: "R003", reactionCode: "BORING", field: "intensity", value: 60 });
+  assert.equal(r.ok.ok, false);
 });
 
 // Extra: numbersEqual — tolerância só para serialização, nunca para número diferente

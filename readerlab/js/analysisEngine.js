@@ -11,7 +11,7 @@ import { getProvider, ProviderError, providerErrorMessage } from "./llm/provider
 import { buildPopulationAnalysisDataset } from "./analytics/populationAnalysisDatasetBuilder.js";
 import { buildResearchAnalystPrompt } from "./llm/researchAnalystPromptBuilder.js";
 import { validateResearchAnalysis, RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION } from "./llm/researchAnalystValidate.js";
-import { compactAnalysisDatasetForBudget } from "./llm/researchAnalystCompaction.js";
+import { compactAnalysisDatasetForBudget, measureDatasetSectionChars } from "./llm/researchAnalystCompaction.js";
 import { DemoResearchAnalystProvider } from "./llm/demoResearchAnalyst.js";
 import { estimateTokensConservative } from "./llm/tokenEstimate.js";
 import {
@@ -62,6 +62,10 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
   const finalDataset = preflight.dataset;
   const { system, user, promptVersion } = buildResearchAnalystPrompt(finalDataset);
   const datasetFinalChars = JSON.stringify(finalDataset).length;
+  // Breakdown de tamanho por seção (seção 10 da tarefa) — diagnóstico para
+  // identificar futuras explosões de tamanho numa seção específica.
+  const datasetSectionCharsBefore = measureDatasetSectionChars(dataset);
+  const datasetSectionCharsAfter = measureDatasetSectionChars(finalDataset);
 
   const analysisRun = D.blankAnalysisRun();
   analysisRun.populationRunId = popRun.id;
@@ -88,6 +92,8 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     analystMaxPromptChars: ANALYST_MAX_PROMPT_CHARS,
     datasetOriginalChars,
     datasetFinalChars,
+    datasetSectionCharsBefore,
+    datasetSectionCharsAfter,
     compactionApplied: preflight.compactionApplied,
     compactionSteps: preflight.stepsApplied,
     ...preflight.stats,

@@ -9,12 +9,17 @@
 // Princípio da v2 (ver builder para o restante — quantitativeMetrics/
 // segments/population/populationRun não mudam de forma entre versões):
 // cada informação textual longa existe UMA vez; o resto referencia por id/
-// code. Isso elimina as duas maiores fontes de duplicação identificadas:
+// code. Isso elimina as maiores fontes de duplicação identificadas:
 //   1) respostas qualitativas repetidas em qualitativeAnswers E de novo
 //      dentro de cada individualResults[i] (v2: só em qualitativeQuestions);
 //   2) questionText de cada pergunta quantitativa repetido em
 //      individualResults[i].quantitativeAnswers para TODA persona (v2: mapa
-//      questionId -> value, texto da pergunta já vive em quantitativeMetrics).
+//      questionId -> value, texto da pergunta já vive em quantitativeMetrics);
+//   3) personaName/attributes/readerState/reactionCodes em individualResults
+//      (v2: personaName já vive em population.personas; attributes não são
+//      evidence suportada pelo Analyst — segments já foram calculados
+//      deterministicamente; readerState não é evidence suportada; reaction
+//      evidence é resolvida inteiramente via reactionEntries).
 
 export function truncateText(str, max, truncatedKeys, key) {
   if (typeof str !== "string" || str.length <= max) return str;
@@ -134,25 +139,21 @@ export function formatIndividualResultsV1(resolvedRows, { attributeById, quantit
   }));
 }
 
-// v2: quantitativeAnswers vira mapa questionId->value (o texto da pergunta
-// já existe em quantitativeMetrics — nunca repetido aqui); reactionCodes
-// substitui a lista {reactionCode,intensity} (intensidade/reason vivem em
-// reactionEntries); qualitativeAnswers é OMITIDO (já existe em
-// qualitativeQuestions, nunca duplicado).
-export function formatIndividualResultsV2(resolvedRows, { attributeById, quantitativeQuestionDefs }) {
+// v2: individualResults carrega SOMENTE o necessário para evidence
+// individual (personaCode + quantitativeAnswers). personaName já existe em
+// population.personas (nunca repetido 100x); attributes individuais não são
+// evidence suportada pelo schema do Analyst (segments já foram calculados
+// deterministicamente); readerState não é evidence suportada; reaction
+// evidence (existência/intensidade/reason) é resolvida inteiramente via
+// reactionEntries — nunca duplicada aqui.
+export function formatIndividualResultsV2(resolvedRows, { quantitativeQuestionDefs }) {
   return resolvedRows.map(({ persona, result }) => {
     const quantitativeAnswers = {};
     quantitativeQuestionDefs.forEach((q) => {
       const v = result.surveyAnswers.find((a) => a.questionId === q.id)?.value;
       if (v != null) quantitativeAnswers[q.id] = v;
     });
-    return {
-      personaCode: persona.code || null,
-      personaName: persona.name,
-      attributes: buildAttributesMap(persona, attributeById),
-      quantitativeAnswers,
-      reactionCodes: result.reactions.map((rr) => rr.reactionCode),
-      readerState: result.readerState || null,
-    };
+    return { personaCode: persona.code || null, quantitativeAnswers };
   });
 }
+

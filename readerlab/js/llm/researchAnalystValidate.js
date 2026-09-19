@@ -223,12 +223,14 @@ function checkEvidence(e, index) {
       const r = index.reactionByCode.get(e.reactionCode);
       if (!r) return `reactionCode inexistente no dataset: "${e.reactionCode}".`;
       if (e.field !== "intensity") return `field inválido para persona+reaction (use "intensity"): "${e.field}".`;
-      // v2: individualResults só guarda reactionCodes (existência); a
-      // intensidade/reason vivem em reactionEntries (ver builder).
-      if (!asArray(persona.reactionCodes).includes(e.reactionCode)) return `Persona "${e.personaCode}" não emitiu a reação "${e.reactionCode}".`;
+      // v2: individualResults NÃO guarda mais reactionCodes — reason/
+      // intensidade por persona vivem exclusivamente em reactionEntries
+      // (ver builder). Se a entry não estiver presente no dataset FINAL
+      // enviado (ex.: removida pela compactação adaptativa), a evidence
+      // não pode ser usada — nunca validamos contra o dataset original.
       const entry = index.reactionEntryByPersonaAndCode.get(`${e.personaCode}::${e.reactionCode}`);
-      const intensity = entry ? entry.intensity : null;
-      if (intensity == null || !numbersEqual(e.value, intensity)) return `valor divergente para persona "${e.personaCode}" / reação "${e.reactionCode}" (dataset=${intensity}, citado=${e.value}).`;
+      if (!entry) return `Persona "${e.personaCode}" não possui reactionEntry para "${e.reactionCode}" no dataset final (reação não emitida ou removida pela compactação).`;
+      if (!numbersEqual(e.value, entry.intensity)) return `valor divergente para persona "${e.personaCode}" / reação "${e.reactionCode}" (dataset=${entry.intensity}, citado=${e.value}).`;
       return null;
     }
     return `evidence de persona precisa referenciar metricId ou reactionCode.`;

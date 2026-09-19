@@ -20,6 +20,8 @@ import {
   limitReactionReasonsPerCode,
   limitQualitativeAnswersPerQuestion,
   truncateLongTexts,
+  evenlySpacedIndices,
+  measureDatasetSectionChars,
 } from "./researchAnalystCompaction.js";
 
 let passed = 0;
@@ -148,18 +150,31 @@ test("removeNonAnalyticMetadata: remove truncatedFields/attributeCatalogLegacyFa
   assert.equal(out.populationRun.sampleSize, dataset.populationRun.sampleSize);
 });
 
-test("limitReactionReasonsPerCode: seleção determinística pelas primeiras N por personaCode", () => {
+test("limitReactionReasonsPerCode: amostragem espalhada por intensidade (nunca só os primeiros personaCodes)", () => {
   const dataset = makeDataset(10);
   const out = limitReactionReasonsPerCode(dataset, 3);
   const kept = out.reactionEntries.map((e) => e.personaCode);
-  assert.deepEqual(kept, ["R0001", "R0002", "R0003"]);
+  assert.deepEqual(kept, ["R0001", "R0006", "R0010"]);
+  const sampling = out.reactionEntriesSampling.find((s) => s.reactionCode === "BORING");
+  assert.deepEqual(sampling, { reactionCode: "BORING", originalCount: 10, includedCount: 3 });
 });
 
-test("limitQualitativeAnswersPerQuestion: seleção determinística pelas primeiras N por personaCode", () => {
+test("limitReactionReasonsPerCode: preserva variedade de intensidade (baixa/média/alta), nunca só um extremo", () => {
+  const dataset = makeDataset(9);
+  // intensidades bem distintas por persona (0..80) em vez do valor fixo do fixture padrão
+  dataset.reactionEntries.forEach((e, i) => { e.intensity = i * 10; });
+  const out = limitReactionReasonsPerCode(dataset, 3);
+  const intensities = out.reactionEntries.map((e) => e.intensity).sort((a, b) => a - b);
+  assert.deepEqual(intensities, [0, 40, 80]);
+});
+
+test("limitQualitativeAnswersPerQuestion: amostragem espalhada pela população (nunca só os primeiros personaCodes)", () => {
   const dataset = makeDataset(10);
   const out = limitQualitativeAnswersPerQuestion(dataset, 4);
   const kept = out.qualitativeQuestions[0].answers.map((a) => a.personaCode);
-  assert.deepEqual(kept, ["R0001", "R0002", "R0003", "R0004"]);
+  assert.deepEqual(kept, ["R0001", "R0004", "R0007", "R0010"]);
+  assert.equal(out.qualitativeQuestions[0].answersOriginalCount, 10);
+  assert.equal(out.qualitativeQuestions[0].answersIncludedCount, 4);
 });
 
 test("truncateLongTexts: aplica marcador explícito e conta truncamentos", () => {
@@ -169,6 +184,34 @@ test("truncateLongTexts: aplica marcador explícito e conta truncamentos", () =>
   assert.equal(truncatedReasonCount, 2);
   out.qualitativeQuestions[0].answers.forEach((a) => assert.ok(a.value.endsWith("...[truncated]")));
   out.reactionEntries.forEach((e) => assert.ok(e.reason.endsWith("...[truncated]")));
+});
+
+// ------------------------------------------------- evenlySpacedIndices
+test("evenlySpacedIndices: n=100,k=10 -> inclui os dois extremos, espaçamento uniforme (nunca Math.random)", () => {
+  assert.deepEqual(evenlySpacedIndices(100, 10), [0, 11, 22, 33, 44, 55, 66, 77, 88, 99]);
+});
+
+test("evenlySpacedIndices: k >= n -> retorna todos os índices", () => {
+  assert.deepEqual(evenlySpacedIndices(3, 10), [0, 1, 2]);
+});
+
+test("evenlySpacedIndices: determinístico (chamadas repetidas produzem o mesmo resultado)", () => {
+  const a = evenlySpacedIndices(37, 6);
+  const b = evenlySpacedIndices(37, 6);
+  assert.deepEqual(a, b);
+});
+
+// ------------------------------------------------- measureDatasetSectionChars
+test("measureDatasetSectionChars: retorna um breakdown de tamanho por seção", () => {
+  const dataset = makeDataset(5);
+  const breakdown = measureDatasetSectionChars(dataset);
+  assert.ok(breakdown.individualResults > 0);
+  assert.ok(breakdown.qualitativeQuestions > 0);
+  assert.ok(breakdown.reactionEntries > 0);
+  assert.ok(breakdown.quantitativeMetrics > 0);
+  assert.ok(breakdown.reactionAggregates > 0);
+  assert.ok(breakdown.segments > 0);
+  assert.ok(breakdown.population > 0);
 });
 
 console.log(`\n${passed} teste(s) passaram.`);
