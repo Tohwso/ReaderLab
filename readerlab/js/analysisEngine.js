@@ -2,24 +2,26 @@
 // Único lugar que chama a LLM para interpretar os resultados de uma
 // PopulationRun já concluída. Mesmo padrão do engine.js (PENDING → RUNNING
 // → COMPLETED/FAILED, nunca lança para o chamador, snapshot congelado ANTES
-// de chamar a LLM) — mas aqui o "snapshot" é o dataset analítico
-// determinístico (nunca o texto/manuscrito), e não há laço sobre Personas:
-// é uma única chamada de interpretação.
+// de chamar a LLM) — mas aqui o "snapshot" é o ResearchAnalysisBrief (nunca
+// o texto/manuscrito, nunca o PopulationAnalysisDataset completo), e não
+// há laço sobre Personas: é uma única chamada de interpretação.
 import * as S from "./store.js";
 import * as D from "./domain.js";
 import { getProvider, ProviderError, providerErrorMessage } from "./llm/provider.js";
 import { buildPopulationAnalysisDataset } from "./analytics/populationAnalysisDatasetBuilder.js";
+import { buildResearchAnalysisBrief } from "./analytics/researchAnalysisBriefBuilder.js";
 import { buildResearchAnalystPrompt } from "./llm/researchAnalystPromptBuilder.js";
 import { validateResearchAnalysis, RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION } from "./llm/researchAnalystValidate.js";
-import { compactAnalysisDatasetForBudget, measureDatasetSectionChars } from "./llm/researchAnalystCompaction.js";
 import { DemoResearchAnalystProvider } from "./llm/demoResearchAnalyst.js";
 import { estimateTokensConservative } from "./llm/tokenEstimate.js";
 import {
   ANALYST_MAX_PROMPT_CHARS,
-  ANALYST_MAX_REACTION_REASONS_PER_CODE,
-  ANALYST_MAX_QUALITATIVE_ANSWERS_PER_QUESTION,
-  ANALYST_MAX_QUALITATIVE_ANSWER_CHARS,
-  ANALYST_MAX_REACTION_REASON_CHARS,
+  ANALYST_TARGET_PROMPT_CHARS,
+  ANALYST_OUTLIERS_PER_SIDE,
+  ANALYST_QUALITATIVE_SAMPLES_PER_QUESTION,
+  ANALYST_QUALITATIVE_SAMPLE_MAX_CHARS,
+  ANALYST_REACTION_SAMPLES_PER_CODE,
+  ANALYST_REACTION_SAMPLE_MAX_CHARS,
 } from "./config.js";
 
 // Pipeline de uma tentativa: LLM → parse JSON → schema → evidence semântica
@@ -34,81 +36,78 @@ const MAX_ATTEMPTS = 2;
 // hub (só os segmentos efetivamente configurados pelo usuário).
 export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = [] } = {}) {
   const isDemo = mode === "demo";
+  // PopulationAnalysisDataset completo — NUNCA destruído/substituído, é a
+  // fonte de verdade preservada no ReaderLab. O Research Analyst nunca vê
+  // este objeto diretamente: ele só recebe o brief calculado a partir dele
+  // (ver analytics/researchAnalysisBriefBuilder.js).
   const dataset = buildPopulationAnalysisDataset(popRun, { segments });
-  const datasetOriginalChars = JSON.stringify(dataset).length;
+  const sourceDatasetChars = JSON.stringify(dataset).length;
 
-  // Preflight determinístico: NUNCA chamar o provider com um prompt que o
-  // próprio ReaderLab já sabe que a Edge Function vai rejeitar (413) —
-  // mede o userPrompt EXATO que seria enviado (mesma função usada na
-  // chamada real) e, se exceder o orçamento, aplica compactação
-  // determinística (ver llm/researchAnalystCompaction.js) ANTES de decidir
-  // se prossegue.
-  const measureUserPromptChars = (ds) => buildResearchAnalystPrompt(ds).user.length;
-  const preflight = compactAnalysisDatasetForBudget(
-    dataset,
-    {
-      maxPromptChars: ANALYST_MAX_PROMPT_CHARS,
-      maxReactionReasonsPerCode: ANALYST_MAX_REACTION_REASONS_PER_CODE,
-      maxQualitativeAnswersPerQuestion: ANALYST_MAX_QUALITATIVE_ANSWERS_PER_QUESTION,
-      maxQualitativeAnswerChars: ANALYST_MAX_QUALITATIVE_ANSWER_CHARS,
-      maxReactionReasonChars: ANALYST_MAX_REACTION_REASON_CHARS,
-    },
-    measureUserPromptChars
-  );
-  // A partir daqui, `finalDataset` é a ÚNICA fonte de verdade: é o que vai
-  // no prompt, no executionSnapshot e na validação de evidence — nunca
-  // validar a resposta da LLM contra o dataset original se ele foi
-  // compactado (evidence é verificada contra o que foi de fato enviado).
-  const finalDataset = preflight.dataset;
-  const { system, user, promptVersion } = buildResearchAnalystPrompt(finalDataset);
-  const datasetFinalChars = JSON.stringify(finalDataset).length;
-  // Breakdown de tamanho por seção (seção 10 da tarefa) — diagnóstico para
-  // identificar futuras explosões de tamanho numa seção específica.
-  const datasetSectionCharsBefore = measureDatasetSectionChars(dataset);
-  const datasetSectionCharsAfter = measureDatasetSectionChars(finalDataset);
+  // Em vez de compactar agressivamente o dataset inteiro conforme a
+  // população cresce, o brief seleciona agregados COMPLETOS + uma amostra
+  // determinística de evidências individuais — o tamanho resultante
+  // escala com número de perguntas/reactionCodes/segmentos, não com o
+  // número de Personas (ver researchAnalysisBriefBuilder.js).
+  const brief = buildResearchAnalysisBrief(dataset, {
+    outliersPerSide: ANALYST_OUTLIERS_PER_SIDE,
+    qualitativeSamplesPerQuestion: ANALYST_QUALITATIVE_SAMPLES_PER_QUESTION,
+    qualitativeSampleMaxChars: ANALYST_QUALITATIVE_SAMPLE_MAX_CHARS,
+    reactionSamplesPerCode: ANALYST_REACTION_SAMPLES_PER_CODE,
+    reactionSampleMaxChars: ANALYST_REACTION_SAMPLE_MAX_CHARS,
+  });
+  const briefChars = JSON.stringify(brief).length;
+  const { system, user, promptVersion } = buildResearchAnalystPrompt(brief);
+  const compressionRatio = sourceDatasetChars ? Math.round((1 - briefChars / sourceDatasetChars) * 1000) / 1000 : null;
+  // Alvo recomendado (nunca um limite rígido — ver config.js) só para
+  // observabilidade; nunca bloqueia o envio nem falha a análise sozinho.
+  const analysisBriefLargerThanTarget = user.length > ANALYST_TARGET_PROMPT_CHARS;
 
   const analysisRun = D.blankAnalysisRun();
   analysisRun.populationRunId = popRun.id;
   analysisRun.provider = isDemo ? "demo-local" : liveCfg.provider;
   analysisRun.model = isDemo ? "demo-analyst-v1" : "";
   analysisRun.promptVersion = promptVersion;
-  analysisRun.executionSnapshot = finalDataset;
+  // executionSnapshot guarda exatamente o brief enviado à LLM — nunca o
+  // dataset completo de novo dentro da AnalysisRun (ver seção 14 da tarefa).
+  analysisRun.executionSnapshot = brief;
   analysisRun.requestMetadata = {
-    datasetVersion: dataset.analysisDatasetVersion,
+    researchAnalysisBriefVersion: brief.researchAnalysisBriefVersion,
+    sourceDatasetVersion: dataset.analysisDatasetVersion,
     populationRunId: popRun.id,
     personaCount: dataset.population.personas.length,
     completedRuns: dataset.populationRun.completed,
     failedRuns: dataset.populationRun.failed,
     quantitativeMetricCount: dataset.quantitativeMetrics.length,
-    // v2 renomeia qualitativeAnswers -> qualitativeQuestions (ver builder);
-    // fallback cobre só o caminho explícito de comparação com version:1.
-    qualitativeQuestionCount: (dataset.qualitativeQuestions || dataset.qualitativeAnswers || []).length,
+    qualitativeQuestionCount: (dataset.qualitativeQuestions || []).length,
     segmentCount: dataset.segments.length,
-    truncatedFieldCount: dataset.truncatedFields.length,
     systemPromptChars: system.length,
     userPromptChars: user.length,
     promptChars: system.length + user.length,
     estimatedTokensApprox: estimateTokensConservative(user),
     analystMaxPromptChars: ANALYST_MAX_PROMPT_CHARS,
-    datasetOriginalChars,
-    datasetFinalChars,
-    datasetSectionCharsBefore,
-    datasetSectionCharsAfter,
-    compactionApplied: preflight.compactionApplied,
-    compactionSteps: preflight.stepsApplied,
-    ...preflight.stats,
+    analystTargetPromptChars: ANALYST_TARGET_PROMPT_CHARS,
+    sourceDatasetChars,
+    briefChars,
+    compressionRatio,
+    quantitativeOutlierCount: brief.quantitativeOutliers.reduce((sum, q) => sum + q.low.length + q.high.length, 0),
+    qualitativeSamplesIncluded: brief.qualitativeEvidence.reduce((sum, q) => sum + q.samples.length, 0),
+    reactionSamplesIncluded: brief.reactionEvidence.reduce((sum, r) => sum + r.samples.length, 0),
+    analysisBriefLargerThanTarget,
   };
   await S.saveAnalysisRun(analysisRun);
 
-  // Orçamento estourado mesmo após a compactação determinística completa —
-  // nunca chamar o provider (nunca descobrir isto via 413); falha com um
-  // erro específico e mensagem amigável (ver ui.js para exibição).
-  if (!preflight.fits) {
+  // Orçamento estourado mesmo com o brief (cenário raro — muitas
+  // perguntas/reactionCodes/segmentos configurados) — nunca chamar o
+  // provider (nunca descobrir isto via 413); falha com um erro específico
+  // e mensagem amigável (ver ui.js para exibição). NUNCA aumentar
+  // ANALYST_MAX_PROMPT_CHARS, dividir em múltiplas chamadas ou resumir com
+  // outra LLM como "solução" para este caso.
+  if (user.length > ANALYST_MAX_PROMPT_CHARS) {
     analysisRun.status = "FAILED";
     analysisRun.completedAt = D.nowISO();
     analysisRun.errorMessage =
       "Os resultados desta população são grandes demais para análise em uma única chamada com a configuração atual. " +
-      `Dataset analítico muito grande: ${user.length} caracteres após compactação; limite ${ANALYST_MAX_PROMPT_CHARS}.`;
+      `Research brief muito grande: ${user.length} caracteres; limite ${ANALYST_MAX_PROMPT_CHARS}.`;
     await S.saveAnalysisRun(analysisRun);
     return { ok: false, analysisRun, error: new ProviderError("ANALYSIS_INPUT_TOO_LARGE", analysisRun.errorMessage) };
   }
@@ -118,7 +117,7 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
   await S.saveAnalysisRun(analysisRun);
 
   try {
-    const provider = isDemo ? new DemoResearchAnalystProvider({ dataset: finalDataset }) : getProvider(liveCfg);
+    const provider = isDemo ? new DemoResearchAnalystProvider({ dataset: brief }) : getProvider(liveCfg);
 
     let userPrompt = user;
     let model, usage;
@@ -137,19 +136,19 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
         parsed = JSON.parse(res.content);
       } catch (_) {
         lastErrors = ["O modelo retornou um JSON inválido."];
-        if (attempt < MAX_ATTEMPTS) userPrompt = buildResearchAnalystPrompt(finalDataset, { retryErrors: lastErrors }).user;
+        if (attempt < MAX_ATTEMPTS) userPrompt = buildResearchAnalystPrompt(brief, { retryErrors: lastErrors }).user;
         continue;
       }
 
-      // validateResearchAnalysis(analysis, dataset): schema + evidence
-      // semântica contra o dataset determinístico numa única chamada —
-      // qualquer evidence fabricada/incorreta reprova a tentativa inteira.
-      const validation = validateResearchAnalysis(parsed, finalDataset);
+      // validateResearchAnalysis(analysis, brief): schema + evidence
+      // semântica contra o ResearchAnalysisBrief — qualquer evidence
+      // fabricada/incorreta reprova a tentativa inteira.
+      const validation = validateResearchAnalysis(parsed, brief);
       if (validation.ok) {
         value = validation.value;
       } else {
         lastErrors = validation.errors;
-        if (attempt < MAX_ATTEMPTS) userPrompt = buildResearchAnalystPrompt(finalDataset, { retryErrors: lastErrors }).user;
+        if (attempt < MAX_ATTEMPTS) userPrompt = buildResearchAnalystPrompt(brief, { retryErrors: lastErrors }).user;
       }
     }
 
@@ -175,3 +174,4 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     return { ok: false, analysisRun, error: err };
   }
 }
+

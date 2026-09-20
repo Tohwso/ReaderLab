@@ -5,8 +5,10 @@
 //      análise inteira quando "executiveSummary" está ausente.
 //   2) validação SEMÂNTICA de evidence — cada `evidence` citada pelo
 //      Analyst precisa referenciar um dado que EXISTE literalmente no
-//      dataset determinístico (ver analytics/populationAnalysisDatasetBuilder.js)
-//      e o "value" citado precisa CORRESPONDER ao valor real (tolerância
+//      ResearchAnalysisBrief enviado a ele (ver
+//      analytics/researchAnalysisBriefBuilder.js — NUNCA o
+//      PopulationAnalysisDataset completo, que a LLM nem chega a ver) e o
+//      "value" citado precisa CORRESPONDER ao valor real (tolerância
 //      apenas para float/serialização, nunca para números diferentes). A
 //      LLM interpreta; ela não pode fabricar métricas, personas, segmentos,
 //      reações, perguntas ou valores inexistentes. Qualquer evidence
@@ -16,8 +18,9 @@
 // Compatibilidade histórica: este validator SÓ roda no momento da geração
 // de uma AnalysisRun nova — nunca é reaplicado sobre `analysisJson` já
 // persistido. AnalysisRuns antigas (schema de evidence v1, formato livre
-// `{ type, reference, value }`) continuam legíveis pela UI (ver
-// `renderEvidenceList` em ui.js), só não passaram por esta verificação.
+// `{ type, reference, value }`, ou v2 validadas contra o dataset completo)
+// continuam legíveis pela UI (ver `renderEvidenceList` em ui.js), só não
+// passaram por esta verificação novamente.
 
 export const RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION = 2;
 
@@ -160,23 +163,41 @@ function validateSchema(parsed) {
 
 // ======================================================= 2) evidence
 // Índices de busca O(1) construídos uma única vez por validação, direto
-// sobre o dataset determinístico (nunca sobre S.state — o Analyst só vê o
-// dataset, então é exatamente contra ele que citações são verificadas).
-function buildDatasetIndex(dataset) {
-  const d = dataset || {};
-  // v2 renomeia qualitativeAnswers -> qualitativeQuestions (ver
-  // populationAnalysisDatasetBuilder.js); qualitativeAnswers só existe em
-  // datasets version:1 (comparação/teste), nunca gerado por padrão.
-  const qualitativeSource = d.qualitativeQuestions || d.qualitativeAnswers;
+// sobre o ResearchAnalysisBrief (nunca sobre S.state nem sobre o dataset
+// completo — o Analyst só vê o brief, então é exatamente contra ele que
+// citações são verificadas; ver analytics/researchAnalysisBriefBuilder.js).
+function buildBriefIndex(brief) {
+  const b = brief || {};
+
+  // persona + metric: só existe para Personas presentes em
+  // quantitativeOutliers (low/high) — individualResults completo nunca é
+  // enviado à LLM, então nunca é usado aqui.
+  const personaMetricValue = new Map();
+  asArray(b.quantitativeOutliers).forEach((qo) => {
+    [...asArray(qo.low), ...asArray(qo.high)].forEach((entry) => {
+      personaMetricValue.set(`${entry.personaCode}::${qo.questionId}`, entry.value);
+    });
+  });
+
+  // persona + reaction: só existe para Personas presentes em
+  // reactionEvidence[].samples — reactionEntries completo nunca é enviado.
+  const personaReactionSample = new Map();
+  asArray(b.reactionEvidence).forEach((re) => {
+    asArray(re.samples).forEach((s) => {
+      personaReactionSample.set(`${s.personaCode}::${re.reactionCode}`, s);
+    });
+  });
+
   return {
-    metricById: new Map(asArray(d.quantitativeMetrics).map((m) => [String(m.questionId), m])),
-    reactionByCode: new Map(asArray(d.reactionAggregates).map((r) => [r.reactionCode, r])),
-    personaByCode: new Map(asArray(d.individualResults).map((p) => [p.personaCode, p])),
-    segmentByName: new Map(asArray(d.segments).map((s) => [s.name, s])),
-    qualitativeByQuestionId: new Map(asArray(qualitativeSource).map((q) => [String(q.questionId), q])),
-    // Só existe em datasets version:2 — reasons/intensity de reação vivem
-    // aqui, fora de individualResults/reactionAggregates (ver builder).
-    reactionEntryByPersonaAndCode: new Map(asArray(d.reactionEntries).map((e) => [`${e.personaCode}::${e.reactionCode}`, e])),
+    metricById: new Map(asArray(b.quantitativeMetrics).map((m) => [String(m.questionId), m])),
+    reactionByCode: new Map(asArray(b.reactionAggregates).map((r) => [r.reactionCode, r])),
+    segmentByName: new Map(asArray(b.segments).map((s) => [s.name, s])),
+    qualitativeByQuestionId: new Map(asArray(b.qualitativeEvidence).map((q) => [String(q.questionId), q])),
+    personaMetricValue,
+    personaReactionSample,
+    // Toda Persona que aparece em QUALQUER evidência individual do brief
+    // (ver personaIndex — construído com exatamente este critério).
+    personaCodes: new Set(Object.keys(b.personaIndex || {})),
   };
 }
 
@@ -189,48 +210,45 @@ function checkEvidence(e, index) {
 
   if (e.type === "metric") {
     const m = index.metricById.get(e.metricId);
-    if (!m) return `metricId inexistente no dataset: "${e.metricId}".`;
+    if (!m) return `metricId inexistente no brief: "${e.metricId}".`;
     if (!METRIC_FIELDS.includes(e.field)) return `field inválido para metric: "${e.field}".`;
     if (m[e.field] == null) return `metric "${e.metricId}" não possui valor para field "${e.field}" (amostra vazia).`;
-    if (!numbersEqual(e.value, m[e.field])) return `valor divergente para metric "${e.metricId}".${e.field} (dataset=${m[e.field]}, citado=${e.value}).`;
+    if (!numbersEqual(e.value, m[e.field])) return `valor divergente para metric "${e.metricId}".${e.field} (brief=${m[e.field]}, citado=${e.value}).`;
     return null;
   }
 
   if (e.type === "reaction") {
     const r = index.reactionByCode.get(e.reactionCode);
-    if (!r) return `reactionCode inexistente no dataset: "${e.reactionCode}".`;
+    if (!r) return `reactionCode inexistente no brief: "${e.reactionCode}".`;
     if (!REACTION_FIELDS.includes(e.field)) return `field inválido para reaction: "${e.field}".`;
     if (r[e.field] == null) return `reaction "${e.reactionCode}" não possui valor para field "${e.field}".`;
-    if (!numbersEqual(e.value, r[e.field])) return `valor divergente para reaction "${e.reactionCode}".${e.field} (dataset=${r[e.field]}, citado=${e.value}).`;
+    if (!numbersEqual(e.value, r[e.field])) return `valor divergente para reaction "${e.reactionCode}".${e.field} (brief=${r[e.field]}, citado=${e.value}).`;
     return null;
   }
 
   if (e.type === "persona") {
-    const persona = index.personaByCode.get(e.personaCode);
-    if (!persona) return `personaCode inexistente no dataset: "${e.personaCode}".`;
+    if (!index.personaCodes.has(e.personaCode)) return `personaCode inexistente no brief: "${e.personaCode}" (não está entre as evidências individuais selecionadas).`;
     if (e.metricId && e.reactionCode) return `evidence de persona deve referenciar metricId OU reactionCode, não ambos.`;
     if (e.metricId) {
       const m = index.metricById.get(e.metricId);
-      if (!m) return `metricId inexistente no dataset: "${e.metricId}".`;
+      if (!m) return `metricId inexistente no brief: "${e.metricId}".`;
       if (e.field !== "value") return `field inválido para persona+metric (use "value"): "${e.field}".`;
-      // v2: quantitativeAnswers é um mapa questionId -> value (ver builder).
-      const qaValue = persona.quantitativeAnswers?.[e.metricId];
-      if (qaValue == null) return `Persona "${e.personaCode}" não respondeu à métrica "${e.metricId}".`;
-      if (!numbersEqual(e.value, qaValue)) return `valor divergente para persona "${e.personaCode}" / metric "${e.metricId}" (dataset=${qaValue}, citado=${e.value}).`;
+      // Só existe para Personas presentes em quantitativeOutliers (ver
+      // researchAnalysisBriefBuilder.js) — nunca todas as Personas.
+      const qaValue = index.personaMetricValue.get(`${e.personaCode}::${e.metricId}`);
+      if (qaValue == null) return `Persona "${e.personaCode}" não está entre os outliers quantitativos selecionados para a métrica "${e.metricId}".`;
+      if (!numbersEqual(e.value, qaValue)) return `valor divergente para persona "${e.personaCode}" / metric "${e.metricId}" (brief=${qaValue}, citado=${e.value}).`;
       return null;
     }
     if (e.reactionCode) {
       const r = index.reactionByCode.get(e.reactionCode);
-      if (!r) return `reactionCode inexistente no dataset: "${e.reactionCode}".`;
+      if (!r) return `reactionCode inexistente no brief: "${e.reactionCode}".`;
       if (e.field !== "intensity") return `field inválido para persona+reaction (use "intensity"): "${e.field}".`;
-      // v2: individualResults NÃO guarda mais reactionCodes — reason/
-      // intensidade por persona vivem exclusivamente em reactionEntries
-      // (ver builder). Se a entry não estiver presente no dataset FINAL
-      // enviado (ex.: removida pela compactação adaptativa), a evidence
-      // não pode ser usada — nunca validamos contra o dataset original.
-      const entry = index.reactionEntryByPersonaAndCode.get(`${e.personaCode}::${e.reactionCode}`);
-      if (!entry) return `Persona "${e.personaCode}" não possui reactionEntry para "${e.reactionCode}" no dataset final (reação não emitida ou removida pela compactação).`;
-      if (!numbersEqual(e.value, entry.intensity)) return `valor divergente para persona "${e.personaCode}" / reação "${e.reactionCode}" (dataset=${entry.intensity}, citado=${e.value}).`;
+      // Só existe para Personas presentes em reactionEvidence[].samples (ver
+      // researchAnalysisBriefBuilder.js) — nunca todas as reactionEntries.
+      const sample = index.personaReactionSample.get(`${e.personaCode}::${e.reactionCode}`);
+      if (!sample) return `Persona "${e.personaCode}" não possui amostra de reação "${e.reactionCode}" no brief enviado.`;
+      if (!numbersEqual(e.value, sample.intensity)) return `valor divergente para persona "${e.personaCode}" / reação "${e.reactionCode}" (brief=${sample.intensity}, citado=${e.value}).`;
       return null;
     }
     return `evidence de persona precisa referenciar metricId ou reactionCode.`;
@@ -238,21 +256,24 @@ function checkEvidence(e, index) {
 
   if (e.type === "segment") {
     const seg = index.segmentByName.get(e.segmentId);
-    if (!seg) return `segmentId inexistente no dataset: "${e.segmentId}".`;
+    if (!seg) return `segmentId inexistente no brief: "${e.segmentId}".`;
     const m = seg.quantitativeMetrics.find((x) => String(x.questionId) === e.metricId);
     if (!m) return `metricId inexistente no segmento "${e.segmentId}": "${e.metricId}".`;
     if (!METRIC_FIELDS.includes(e.field)) return `field inválido para segment: "${e.field}".`;
     if (m[e.field] == null) return `segmento "${e.segmentId}" não possui valor para field "${e.field}" na métrica "${e.metricId}".`;
-    if (!numbersEqual(e.value, m[e.field])) return `valor divergente para segmento "${e.segmentId}" / metric "${e.metricId}".${e.field} (dataset=${m[e.field]}, citado=${e.value}).`;
+    if (!numbersEqual(e.value, m[e.field])) return `valor divergente para segmento "${e.segmentId}" / metric "${e.metricId}".${e.field} (brief=${m[e.field]}, citado=${e.value}).`;
     return null;
   }
 
   if (e.type === "qualitative") {
     const q = index.qualitativeByQuestionId.get(e.questionId);
-    if (!q) return `questionId inexistente no dataset: "${e.questionId}".`;
-    if (!index.personaByCode.has(e.personaCode)) return `personaCode inexistente no dataset: "${e.personaCode}".`;
-    const answered = q.answers.some((a) => a.personaCode === e.personaCode);
-    if (!answered) return `Persona "${e.personaCode}" não possui resposta registrada para a pergunta "${e.questionId}".`;
+    if (!q) return `questionId inexistente no brief: "${e.questionId}".`;
+    if (!index.personaCodes.has(e.personaCode)) return `personaCode inexistente no brief: "${e.personaCode}".`;
+    // v1 do brief só carrega uma AMOSTRA de respostas (ver `samples` e
+    // `answerCount` em researchAnalysisBriefBuilder.js) — só é possível
+    // confirmar a resposta de Personas presentes na amostra enviada.
+    const sampled = q.samples.some((a) => a.personaCode === e.personaCode);
+    if (!sampled) return `Persona "${e.personaCode}" não está entre as amostras qualitativas enviadas para a pergunta "${e.questionId}" (answerCount=${q.answerCount}).`;
     return null;
   }
 
@@ -261,10 +282,10 @@ function checkEvidence(e, index) {
 
 // Percorre toda evidence citada em todas as seções da análise já
 // estruturalmente válida — cada evidence PRECISA existir e corresponder ao
-// dataset; qualquer falha aqui reprova a análise inteira (ver
+// brief; qualquer falha aqui reprova a análise inteira (ver
 // analysisEngine.js: retry único de correção, depois FAILED).
-export function validateEvidenceSemantics(value, dataset) {
-  const index = buildDatasetIndex(dataset);
+export function validateEvidenceSemantics(value, brief) {
+  const index = buildBriefIndex(brief);
   const errors = [];
   const walk = (sectionName, items) => {
     asArray(items).forEach((item, i) => {
@@ -285,16 +306,17 @@ export function validateEvidenceSemantics(value, dataset) {
   return { ok: errors.length === 0, errors };
 }
 
-// API principal — conceitualmente validateResearchAnalysis(analysis, dataset):
+// API principal — conceitualmente validateResearchAnalysis(analysis, brief):
 // 1) valida o schema (descarta itens malformados individualmente);
 // 2) se estruturalmente ok, valida semanticamente cada evidence citada
-//    contra o dataset determinístico. Só retorna ok:true se AMBAS as
-//    camadas passarem — evidence fabricada/incorreta reprova a análise
-//    inteira (nunca é silenciosamente descartada).
-export function validateResearchAnalysis(parsed, dataset) {
+//    contra o ResearchAnalysisBrief (nunca contra o dataset completo, que a
+//    LLM não recebeu). Só retorna ok:true se AMBAS as camadas passarem —
+//    evidence fabricada/incorreta reprova a análise inteira (nunca é
+//    silenciosamente descartada).
+export function validateResearchAnalysis(parsed, brief) {
   const structural = validateSchema(parsed);
   if (!structural.ok) return structural;
-  const semantic = validateEvidenceSemantics(structural.value, dataset);
+  const semantic = validateEvidenceSemantics(structural.value, brief);
   if (!semantic.ok) return { ok: false, value: structural.value, errors: [...structural.errors, ...semantic.errors] };
   return { ok: true, value: structural.value, errors: structural.errors };
 }

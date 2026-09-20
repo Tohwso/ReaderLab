@@ -116,3 +116,26 @@ export const ANALYST_MAX_QUALITATIVE_ANSWERS_PER_QUESTION = numberOverride("READ
 export const ANALYST_MAX_QUALITATIVE_ANSWER_CHARS = numberOverride("READERLAB_ANALYST_MAX_QUALITATIVE_ANSWER_CHARS", 600);
 export const ANALYST_MAX_REACTION_REASON_CHARS = numberOverride("READERLAB_ANALYST_MAX_REACTION_REASON_CHARS", 300);
 export const ANALYST_MAX_REACTION_REASONS_PER_CODE = numberOverride("READERLAB_ANALYST_MAX_REACTION_REASONS_PER_CODE", 20);
+
+// ResearchAnalysisBrief (ver analytics/researchAnalysisBriefBuilder.js) —
+// em vez de compactar agressivamente o PopulationAnalysisDataset inteiro
+// (individualResults/qualitativeQuestions/reactionEntries completos), o
+// Analyst recebe agregados COMPLETOS + uma amostra determinística de
+// evidências individuais. Isso faz o tamanho do prompt escalar com o
+// número de perguntas/reactionCodes/segmentos, e não com o número de
+// Personas — nunca aumentar estes valores como "solução" para uma
+// população grande (o dataset completo continua preservado no
+// ReaderLab; só a amostra enviada à LLM é limitada).
+export const ANALYST_OUTLIERS_PER_SIDE = numberOverride("READERLAB_ANALYST_OUTLIERS_PER_SIDE", 3);
+export const ANALYST_QUALITATIVE_SAMPLES_PER_QUESTION = numberOverride("READERLAB_ANALYST_QUALITATIVE_SAMPLES_PER_QUESTION", 5);
+export const ANALYST_QUALITATIVE_SAMPLE_MAX_CHARS = numberOverride("READERLAB_ANALYST_QUALITATIVE_SAMPLE_MAX_CHARS", 240);
+export const ANALYST_REACTION_SAMPLES_PER_CODE = numberOverride("READERLAB_ANALYST_REACTION_SAMPLES_PER_CODE", 3);
+export const ANALYST_REACTION_SAMPLE_MAX_CHARS = numberOverride("READERLAB_ANALYST_REACTION_SAMPLE_MAX_CHARS", 160);
+
+// Alvo (não um limite rígido) de tamanho do prompt do Analyst — bem abaixo
+// de ANALYST_MAX_PROMPT_CHARS. Um brief maior que isso ainda é ENVIADO
+// normalmente (nunca falha só por isso); só registra
+// `analysisBriefLargerThanTarget: true` em requestMetadata para
+// observabilidade (ver analysisEngine.js).
+export const ANALYST_TARGET_PROMPT_CHARS = numberOverride("READERLAB_ANALYST_TARGET_PROMPT_CHARS", 50000);
+

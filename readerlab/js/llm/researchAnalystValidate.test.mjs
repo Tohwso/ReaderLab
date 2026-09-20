@@ -5,7 +5,8 @@
 //
 // Cobre os cenários pedidos na especificação de endurecimento do Research
 // Analyst (evidence estruturada verificada deterministicamente contra o
-// dataset determinístico — ver researchAnalystValidate.js):
+// ResearchAnalysisBrief — ver researchAnalystValidate.js +
+// analytics/researchAnalysisBriefBuilder.js):
 //   A) metric correta                → PASS
 //   B) metric inexistente            → FAIL
 //   C) valor numérico correto        → PASS
@@ -17,7 +18,7 @@
 //   I) segmento correto              → PASS
 //   J) segmento inexistente          → FAIL
 //   K) qualitative reference correta → PASS
-// + extras: qualitative persona sem resposta → FAIL; numbersEqual tolerância
+// + extras: qualitative persona fora da amostra → FAIL; numbersEqual tolerância
 // de serialização; validateResearchAnalysis (schema + semântica) fim-a-fim.
 import assert from "node:assert/strict";
 import { validateResearchAnalysis, validateEvidenceSemantics, numbersEqual } from "./researchAnalystValidate.js";
@@ -35,23 +36,25 @@ function test(name, fn) {
   }
 }
 
-// Dataset determinístico mínimo, no mesmo shape produzido por
-// buildPopulationAnalysisDataset() versão 2 (compacta) — o suficiente para
-// exercitar todos os tipos de evidence sem precisar de S.state/store.js/db.js.
-const dataset = {
-  analysisDatasetVersion: 2,
+// ResearchAnalysisBrief v1 mínimo, no mesmo shape produzido por
+// buildResearchAnalysisBrief() — o suficiente para exercitar todos os
+// tipos de evidence sem precisar de S.state/store.js/db.js.
+const brief = {
+  researchAnalysisBriefVersion: 1,
   quantitativeMetrics: [
     { questionId: "q1", questionText: "Quão envolvente foi a leitura?", n: 3, mean: 74, median: 75, minimum: 60, maximum: 90, standardDeviation: 12.5, divergence: 0.32, divergenceClassification: "Divergência moderada" },
   ],
   reactionAggregates: [
     { reactionCode: "BORING", reactionName: "Tédio", readerCount: 3, validReaderCount: 10, percentage: 30, meanIntensity: 55, minimumIntensity: 40, maximumIntensity: 70 },
   ],
-  reactionEntries: [
-    { personaCode: "R002", reactionCode: "BORING", intensity: 60, reason: "Achei o meio da história arrastado." },
+  quantitativeOutliers: [
+    { questionId: "q1", questionText: "Quão envolvente foi a leitura?", low: [{ personaCode: "R002", value: 43 }], high: [{ personaCode: "R004", value: 90 }] },
   ],
-  individualResults: [
-    { personaCode: "R002", quantitativeAnswers: { q1: 43 } },
-    { personaCode: "R003", quantitativeAnswers: {} },
+  reactionEvidence: [
+    { reactionCode: "BORING", occurrenceCount: 3, samples: [{ personaCode: "R002", intensity: 60, reason: "Achei o meio da história arrastado." }] },
+  ],
+  qualitativeEvidence: [
+    { questionId: "q2", questionText: "O que mais te marcou?", answerCount: 8, samples: [{ personaCode: "R003", value: "O final surpreendente." }] },
   ],
   segments: [
     {
@@ -59,12 +62,10 @@ const dataset = {
       quantitativeMetrics: [{ questionId: "q1", questionText: "Quão envolvente foi a leitura?", n: 5, mean: 48, median: 50, minimum: 20, maximum: 80, standardDeviation: 15, divergence: 0.4 }],
     },
   ],
-  qualitativeQuestions: [
-    { questionId: "q2", questionText: "O que mais te marcou?", answers: [{ personaCode: "R003", value: "O final surpreendente." }] },
-  ],
+  personaIndex: { R002: "Leitor 2", R003: "Leitor 3", R004: "Leitor 4" },
 };
 
-const evidenceOk = (type, extra) => ({ ok: validateEvidenceSemantics({ consensus: [{ evidence: [{ type, ...extra }] }], polarization: [], outliers: [], segmentInsights: [], reactionPatterns: [], qualitativePatterns: [], interestingContradictions: [], investigationPoints: [] }, dataset) });
+const evidenceOk = (type, extra) => ({ ok: validateEvidenceSemantics({ consensus: [{ evidence: [{ type, ...extra }] }], polarization: [], outliers: [], segmentInsights: [], reactionPatterns: [], qualitativePatterns: [], interestingContradictions: [], investigationPoints: [] }, brief) });
 
 // A) metric correta → PASS
 test("A) metric correta -> PASS", () => {
@@ -127,13 +128,13 @@ test("J) segmentId inexistente -> FAIL", () => {
 });
 
 // K) qualitative reference correta → PASS
-test("K) qualitative correta (persona respondeu a pergunta) -> PASS", () => {
+test("K) qualitative correta (persona está na amostra enviada) -> PASS", () => {
   const r = evidenceOk("qualitative", { questionId: "q2", personaCode: "R003" });
   assert.equal(r.ok.ok, true);
 });
 
-// Extra: qualitative — persona existe mas NÃO respondeu aquela pergunta → FAIL
-test("extra) qualitative persona sem resposta naquela pergunta -> FAIL", () => {
+// Extra: qualitative — persona existe (personaIndex) mas NÃO está na amostra enviada para aquela pergunta → FAIL
+test("extra) qualitative persona fora da amostra enviada -> FAIL", () => {
   const r = evidenceOk("qualitative", { questionId: "q2", personaCode: "R002" });
   assert.equal(r.ok.ok, false);
 });
@@ -144,11 +145,12 @@ test("extra) persona + reactionCode correto -> PASS", () => {
   assert.equal(r.ok.ok, true);
 });
 
-// Extra: individualResults v2 não guarda mais reactionCodes — a evidence só
-// é válida se existir uma reactionEntry correspondente no dataset FINAL
-// (nunca inferida a partir de individualResults, ver seção 2 da tarefa).
-test("extra) persona + reactionCode sem reactionEntry correspondente (ex.: removida pela compactação) -> FAIL", () => {
-  const r = evidenceOk("persona", { personaCode: "R003", reactionCode: "BORING", field: "intensity", value: 60 });
+// Extra: persona presente no personaIndex, mas sem amostra de reação para
+// aquele código específico (ex.: só apareceu em quantitativeOutliers) — a
+// evidence só é válida se existir em reactionEvidence[].samples (nunca
+// inferida a partir de outras seções do brief, ver seção 11 da tarefa).
+test("extra) persona + reactionCode sem amostra correspondente em reactionEvidence -> FAIL", () => {
+  const r = evidenceOk("persona", { personaCode: "R004", reactionCode: "BORING", field: "intensity", value: 60 });
   assert.equal(r.ok.ok, false);
 });
 
@@ -163,7 +165,7 @@ test("extra) validateResearchAnalysis: análise válida fim-a-fim -> ok:true", (
     executiveSummary: "Resumo de teste.",
     consensus: [{ title: "T", observation: "O", evidence: [{ type: "metric", metricId: "q1", field: "mean", value: 74 }] }],
   };
-  const r = validateResearchAnalysis(parsed, dataset);
+  const r = validateResearchAnalysis(parsed, brief);
   assert.equal(r.ok, true);
 });
 
@@ -173,7 +175,7 @@ test("extra) validateResearchAnalysis: evidence fabricada -> ok:false", () => {
     executiveSummary: "Resumo de teste.",
     consensus: [{ title: "T", observation: "O", evidence: [{ type: "metric", metricId: "q1", field: "mean", value: 999 }] }],
   };
-  const r = validateResearchAnalysis(parsed, dataset);
+  const r = validateResearchAnalysis(parsed, brief);
   assert.equal(r.ok, false);
   assert.ok(r.errors.length > 0);
 });
@@ -184,3 +186,4 @@ if (process.exitCode) {
 } else {
   console.log("Todos os testes passaram.");
 }
+
