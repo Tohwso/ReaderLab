@@ -79,3 +79,31 @@ export function sanitizeErrorMessage(message, maxLen = 300) {
   const scrubbed = message.replace(SECRET_LIKE, "[redigido]");
   return scrubbed.length > maxLen ? scrubbed.slice(0, maxLen) + "…" : scrubbed;
 }
+
+// Classifica a falha FINAL do Research Analyst (ver analysisEngine.js) após
+// esgotar todas as tentativas sem produzir uma análise válida. Função PURA
+// (sem I/O) para ser testável isoladamente — analysisEngine.js importa
+// store.js e não roda em Node puro (ver js/analysisEngine.js).
+//
+// `finish_reason === "length"` na última tentativa significa que o modelo
+// foi CORTADO por max_completion_tokens antes de terminar — um problema
+// distinto de uma resposta genuinamente malformada ou com evidence
+// fabricada (JSON inválido/schema/evidence incorretos com finish_reason
+// "stop"). Nunca resolvido aumentando o limite de tokens automaticamente:
+// o chamador só reporta o código ANALYST_OUTPUT_TRUNCATED distintamente,
+// para que um operador humano ajuste ANALYST_MAX_COMPLETION_TOKENS se isso
+// se tornar recorrente.
+export function classifyAnalystFinalFailure(lastFinishReason, lastErrors = []) {
+  if (lastFinishReason === "length") {
+    return {
+      code: "ANALYST_OUTPUT_TRUNCATED",
+      message: "A resposta do modelo foi cortada antes de terminar (finish_reason=length) e não pôde ser interpretada como análise válida. Ajuste ANALYST_MAX_COMPLETION_TOKENS manualmente se isso persistir — nunca aumentado automaticamente.",
+      errorType: LLM_ERROR_TYPES.INVALID_RESPONSE,
+    };
+  }
+  return {
+    code: "INVALID_EVIDENCE",
+    message: "Resposta inválida após correção: " + lastErrors.slice(0, 5).join(" | "),
+    errorType: LLM_ERROR_TYPES.UNKNOWN,
+  };
+}

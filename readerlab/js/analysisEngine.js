@@ -8,6 +8,7 @@
 import * as S from "./store.js";
 import * as D from "./domain.js";
 import { getProvider, ProviderError, providerErrorMessage } from "./llm/provider.js";
+import { classifyAnalystFinalFailure } from "./llm/errorTypes.js";
 import { buildPopulationAnalysisDataset } from "./analytics/populationAnalysisDatasetBuilder.js";
 import { buildResearchAnalysisBrief } from "./analytics/researchAnalysisBriefBuilder.js";
 import { buildResearchAnalystPrompt } from "./llm/researchAnalystPromptBuilder.js";
@@ -22,6 +23,8 @@ import {
   ANALYST_QUALITATIVE_SAMPLE_MAX_CHARS,
   ANALYST_REACTION_SAMPLES_PER_CODE,
   ANALYST_REACTION_SAMPLE_MAX_CHARS,
+  ANALYST_REASONING_EFFORT,
+  ANALYST_MAX_COMPLETION_TOKENS,
 } from "./config.js";
 
 // Pipeline de uma tentativa: LLM → parse JSON → schema → evidence semântica
@@ -93,6 +96,11 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     qualitativeSamplesIncluded: brief.qualitativeEvidence.reduce((sum, q) => sum + q.samples.length, 0),
     reactionSamplesIncluded: brief.reactionEvidence.reduce((sum, r) => sum + r.samples.length, 0),
     analysisBriefLargerThanTarget,
+    // Parâmetros efetivamente enviados ao provider real nesta execução —
+    // fonte única de verdade: js/config.js (nunca hardcoded aqui nem
+    // reaproveitados de LLM_READER_*, ver comentário em config.js).
+    reasoningEffort: ANALYST_REASONING_EFFORT,
+    maxCompletionTokens: ANALYST_MAX_COMPLETION_TOKENS,
   };
   await S.saveAnalysisRun(analysisRun);
 
@@ -124,12 +132,22 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     let attempt = 0;
     let value = null;
     let lastErrors = [];
+    let lastFinishReason = null;
 
     while (attempt < MAX_ATTEMPTS && !value) {
       attempt++;
-      const res = await provider.complete({ systemPrompt: system, userPrompt });
+      // reasoning_effort/max_completion_tokens aplicados a TODAS as
+      // tentativas do Analyst, inclusive o retry de correção após
+      // INVALID_EVIDENCE — nunca aumentados automaticamente entre
+      // tentativas (truncamento nunca é "corrigido" com mais tokens em loop).
+      const res = await provider.complete({
+        systemPrompt: system,
+        userPrompt,
+        ...(isDemo ? {} : { reasoningEffort: ANALYST_REASONING_EFFORT, maxCompletionTokens: ANALYST_MAX_COMPLETION_TOKENS }),
+      });
       model = res.model;
       usage = res.usage;
+      lastFinishReason = res.finishReason ?? null;
 
       let parsed;
       try {
@@ -154,10 +172,15 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
 
     if (!isDemo && model) analysisRun.model = model;
     if (usage) analysisRun.requestMetadata = { ...analysisRun.requestMetadata, tokenUsage: usage };
-    analysisRun.requestMetadata = { ...analysisRun.requestMetadata, attempts: attempt, retried: attempt > 1 };
+    analysisRun.requestMetadata = { ...analysisRun.requestMetadata, attempts: attempt, retried: attempt > 1, finishReason: lastFinishReason };
 
     if (!value) {
-      throw new ProviderError("INVALID_EVIDENCE", "Resposta inválida após correção: " + lastErrors.slice(0, 5).join(" | "));
+      // finish_reason === "length" na última tentativa indica que o modelo
+      // foi cortado por max_completion_tokens antes de terminar o JSON —
+      // classificado distintamente de uma resposta genuinamente
+      // malformada/com evidence fabricada (ver errorTypes.js).
+      const failure = classifyAnalystFinalFailure(lastFinishReason, lastErrors);
+      throw new ProviderError(failure.code, failure.message, { errorType: failure.errorType });
     }
 
     analysisRun.analysisJson = value;

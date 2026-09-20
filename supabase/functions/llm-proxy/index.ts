@@ -6,7 +6,7 @@
 // LLM — model/base URL/API key nunca vêm do frontend.
 //
 // Contrato de entrada: { systemPrompt: string, userPrompt: string, reasoning_effort?: string, max_completion_tokens?: number }
-// Contrato de saída:   { content: string, model: string, structuredOutputMode: string, usage?: {...} }
+// Contrato de saída:   { content: string, model: string, structuredOutputMode: string, usage?: {...}, finish_reason?: string }
 //
 // Segredos (definir com `supabase secrets set ...`, nunca no código):
 //   LLM_API_KEY               — obrigatório, API key do provedor de LLM.
@@ -266,7 +266,12 @@ Deno.serve(async (req: Request) => {
         total_tokens: data.usage.total_tokens,
       }
     : undefined;
+  // finish_reason ("stop" | "length" | ...) do upstream — repassado como
+  // veio, sem interpretar aqui; o frontend usa "length" para distinguir
+  // uma resposta cortada por max_completion_tokens de um JSON só malformado
+  // (ver analysisEngine.js).
+  const finishReason = typeof data?.choices?.[0]?.finish_reason === "string" ? data.choices[0].finish_reason : undefined;
 
-  return json({ content, model, structuredOutputMode, ...(usage ? { usage } : {}) }, 200, cors);
+  return json({ content, model, structuredOutputMode, ...(usage ? { usage } : {}), ...(finishReason ? { finish_reason: finishReason } : {}) }, 200, cors);
 });
 

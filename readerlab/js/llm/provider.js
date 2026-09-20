@@ -157,7 +157,11 @@ export class KimiProvider {
     if (!content || !content.trim()) {
       throw new ProviderError("EMPTY", "O modelo retornou uma resposta vazia.", { errorType: LLM_ERROR_TYPES.SERVER_ERROR });
     }
-    return { content: content.trim(), model: data.model, usage: data.usage, structuredOutputMode: data.structuredOutputMode };
+    // finish_reason ("stop" | "length" | ...) repassado pelo proxy quando o
+    // upstream o fornece — usado por analysisEngine.js para distinguir uma
+    // resposta genuinamente inválida de uma resposta CORTADA por atingir
+    // max_completion_tokens (nunca inferido por heurística de texto).
+    return { content: content.trim(), model: data.model, usage: data.usage, structuredOutputMode: data.structuredOutputMode, finishReason: typeof data.finish_reason === "string" ? data.finish_reason : null };
   }
 }
 

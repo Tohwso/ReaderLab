@@ -87,6 +87,25 @@ amostras determinísticas, não o conjunto completo de respostas; (b) que os
 agregados quantitativos e reactionAggregates representam o conjunto
 completo de resultados válidos (não são amostras).
 
+LIMITES DE TAMANHO DA RESPOSTA (SEMPRE RESPEITAR):
+Seja conciso — este relatório é lido por humanos, não precisa ser extenso.
+Respeite estes limites MÁXIMOS de itens por lista (menos itens está sempre
+bem; nunca preencha uma lista só para atingir o limite):
+  - consensus: no máximo 5 itens
+  - polarization: no máximo 4 itens
+  - outliers: no máximo 5 itens
+  - segmentInsights: no máximo 5 itens
+  - reactionPatterns: no máximo 6 itens
+  - qualitativePatterns: no máximo 6 itens
+  - interestingContradictions: no máximo 4 itens
+  - investigationPoints: no máximo 5 itens
+  - limitations: no máximo 5 itens
+"executiveSummary" deve ter de 2 a 4 frases. Cada "observation"/
+"interpretation"/"hypothesis" deve ser concisa (1-3 frases) — nunca um
+parágrafo longo. Estes limites NUNCA reduzem a qualidade da evidence
+estruturada: toda evidence continua obrigatória e completa como descrito
+acima, o que muda é só o texto interpretativo ao redor dela.
+
 FORMATO DE SAÍDA:
 Responda EXCLUSIVAMENTE com um único objeto JSON válido, seguindo o schema
 fornecido. Nenhum texto fora do JSON.`;
@@ -95,32 +114,32 @@ const section = (title) => `\n===== ${title} =====\n`;
 
 function formatOutputSchema() {
   return `{
-  "executiveSummary": "<resumo executivo em texto corrido, 2-5 frases>",
-  "consensus": [
-    { "title": "<título curto>", "observation": "<o que os dados mostram>", "evidence": [...] }
+  "executiveSummary": "<resumo executivo em texto corrido, 2-4 frases>",
+  "consensus": [ // máximo 5 itens
+    { "title": "<título curto>", "observation": "<o que os dados mostram, 1-3 frases>", "evidence": [...] }
   ],
-  "polarization": [
-    { "title": "<título curto>", "observation": "<o que os dados mostram>", "interpretation": "<hipótese cautelosa>", "evidence": [...] }
+  "polarization": [ // máximo 4 itens
+    { "title": "<título curto>", "observation": "<o que os dados mostram, 1-3 frases>", "interpretation": "<hipótese cautelosa, 1-3 frases>", "evidence": [...] }
   ],
-  "outliers": [
-    { "personaCode": "<code presente no dataset>", "personaName": "<nome>", "observation": "<por que se destaca>", "evidence": [...] }
+  "outliers": [ // máximo 5 itens
+    { "personaCode": "<code presente no dataset>", "personaName": "<nome>", "observation": "<por que se destaca, 1-3 frases>", "evidence": [...] }
   ],
-  "segmentInsights": [
-    { "segment": "<nome do segmento presente no dataset>", "observation": "<diferença observada>", "interpretation": "<hipótese cautelosa>", "evidence": [...] }
+  "segmentInsights": [ // máximo 5 itens
+    { "segment": "<nome do segmento presente no dataset>", "observation": "<diferença observada, 1-3 frases>", "interpretation": "<hipótese cautelosa, 1-3 frases>", "evidence": [...] }
   ],
-  "reactionPatterns": [
-    { "reactionCode": "<code presente no dataset>", "observation": "<padrão observado>", "evidence": [...] }
+  "reactionPatterns": [ // máximo 6 itens
+    { "reactionCode": "<code presente no dataset>", "observation": "<padrão observado, 1-3 frases>", "evidence": [...] }
   ],
-  "qualitativePatterns": [
-    { "questionId": "<id da pergunta, se aplicável>", "pattern": "<padrão textual recorrente>", "evidence": [...] }
+  "qualitativePatterns": [ // máximo 6 itens
+    { "questionId": "<id da pergunta, se aplicável>", "pattern": "<padrão textual recorrente, 1-3 frases>", "evidence": [...] }
   ],
-  "interestingContradictions": [
-    { "observation": "<contradição observada nos dados>", "interpretation": "<hipótese cautelosa>", "evidence": [...] }
+  "interestingContradictions": [ // máximo 4 itens
+    { "observation": "<contradição observada nos dados, 1-3 frases>", "interpretation": "<hipótese cautelosa, 1-3 frases>", "evidence": [...] }
   ],
-  "investigationPoints": [
-    { "title": "<título curto>", "hypothesis": "<hipótese a investigar>", "whyInvestigate": "<justificativa>", "confidence": "low|medium|high", "evidence": [...] }
+  "investigationPoints": [ // máximo 5 itens
+    { "title": "<título curto>", "hypothesis": "<hipótese a investigar, 1-3 frases>", "whyInvestigate": "<justificativa, 1-3 frases>", "confidence": "low|medium|high", "evidence": [...] }
   ],
-  "limitations": ["<limitação desta análise, ex.: amostra pequena, dataset truncado, etc.>"]
+  "limitations": ["<limitação desta análise, ex.: amostra pequena, dataset truncado, etc.>"] // máximo 5 itens
 }
 
 FORMATO DE "evidence" — SEMPRE um objeto estruturado (nunca texto livre), um dos 5 formatos abaixo, usando apenas IDs/códigos LITERALMENTE presentes no dataset:

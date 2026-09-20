@@ -139,3 +139,15 @@ export const ANALYST_REACTION_SAMPLE_MAX_CHARS = numberOverride("READERLAB_ANALY
 // observabilidade (ver analysisEngine.js).
 export const ANALYST_TARGET_PROMPT_CHARS = numberOverride("READERLAB_ANALYST_TARGET_PROMPT_CHARS", 50000);
 
+// Parâmetros enviados EXPLICITAMENTE ao Kimi K3 pelo Research Analyst (ver
+// js/llm/provider.js + js/analysisEngine.js) — independentes de
+// LLM_READER_REASONING_EFFORT/LLM_READER_MAX_COMPLETION_TOKENS acima:
+// ReadingRun e Research Analyst têm requisitos de saída diferentes, nunca
+// reutilizar a config de um no outro. Motivo original desta config: sem
+// max_completion_tokens explícito, o Kimi K3 usa seu próprio default muito
+// alto, o que fazia a chamada estourar o timeout de 140s da Edge Function
+// (ver TIMEOUT_MS em supabase/functions/llm-proxy/index.ts — nunca "corrigir"
+// isto aumentando o timeout, a causa raiz é o tamanho da geração de saída).
+export const ANALYST_REASONING_EFFORT = stringOverride("READERLAB_ANALYST_REASONING_EFFORT", "low", ["low", "high", "max"]);
+export const ANALYST_MAX_COMPLETION_TOKENS = numberOverride("READERLAB_ANALYST_MAX_COMPLETION_TOKENS", 8000);
+
