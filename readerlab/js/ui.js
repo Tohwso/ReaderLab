@@ -3,6 +3,9 @@ import * as S from "./store.js";
 import * as D from "./domain.js";
 import { persistenceMode, signOut } from "./db.js";
 import { getLLMConfig } from "./llm/provider.js";
+import { estimateTokensConservative } from "./llm/tokenEstimate.js";
+import { DEFAULT_EXPECTED_READER_OUTPUT_TOKENS, DEFAULT_EXPECTED_ANALYST_OUTPUT_TOKENS, ANALYST_TARGET_PROMPT_CHARS } from "./config.js";
+import { showLLMExecutionDialog } from "./components/llmExecutionDialog.js";
 import { renderRunResultView } from "./components/runResultView.js";
 import { executeReadingRun, executePopulationRun, resumePopulationRun, cancelPopulationRun, isPopulationRunActive } from "./engine.js";
 import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
@@ -1186,6 +1189,27 @@ function viewExecutePopulation(main, popId) {
     const mode = form.querySelector('input[name="pr-mode"]:checked')?.value || "demo";
     const isDemo = mode === "demo";
 
+    // Seleção EXPLÍCITA de modelo para a PopulationRun inteira (ver
+    // components/llmExecutionDialog.js) — congelada uma única vez em
+    // executePopulationRun, nunca reselecionada por Persona. Cancelar o
+    // diálogo aborta a criação da PopulationRun.
+    let modelSelection = null;
+    if (!isDemo) {
+      modelSelection = await showLLMExecutionDialog({
+        purpose: "reader",
+        estimatedInputTokens: estimateTokensConservative(text),
+        estimatedOutputTokens: DEFAULT_EXPECTED_READER_OUTPUT_TOKENS,
+        populationSize: members.length,
+        runs: S.state.runs,
+      });
+      if (!modelSelection) {
+        executing = false;
+        btn.disabled = false;
+        btn.textContent = `Executar ${members.length} leitura(s)`;
+        return;
+      }
+    }
+
     const popRun = D.blankPopulationRun();
     popRun.populationId = pop.id;
     popRun.title = $("#pr-title").value.trim();
@@ -1200,7 +1224,7 @@ function viewExecutePopulation(main, popId) {
     // redirect, evitando qualquer "não encontrada" transitório.
     await S.savePopulationRun(popRun);
     location.hash = "#/population-runs/" + popRun.id;
-    executePopulationRun(popRun, { population: pop, personas: members, survey, mode, liveCfg }).catch((err) => {
+    executePopulationRun(popRun, { population: pop, personas: members, survey, mode, liveCfg, modelId: modelSelection?.modelId, modelPricing: modelSelection?.pricing }).catch((err) => {
       console.error("Falha inesperada ao orquestrar PopulationRun", err);
     });
   });
@@ -1933,6 +1957,13 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
           <span class="faint">·</span>
           <span class="mono small">prompt ${esc(run.promptVersion)}</span>
         </div>
+        ${(() => {
+          const meta = run.requestMetadata;
+          if (!meta || !meta.requestedModelId) return `<p class="muted small" style="margin:0">Custo do Research Analyst: informação não disponível para esta execução.</p>`;
+          const currency = meta.actualCost?.currency || meta.estimatedCost?.currency || "";
+          const fmt = (n) => typeof n === "number" ? n.toLocaleString("pt-BR", { maximumFractionDigits: 4 }) : "—";
+          return `<p class="muted small" style="margin:0">Custo do Research Analyst (${esc(meta.requestedModelId)}): ${meta.actualCost ? `${fmt(meta.actualCost.totalCost)} ${esc(currency)} (real)` : meta.estimatedCost ? `${fmt(meta.estimatedCost.totalCost)} ${esc(currency)} (estimado)` : "—"}</p>`;
+        })()}
         ${run.status === "FAILED" ? `<div class="info-box bad"><span>⚠</span><span>${esc(run.errorMessage || "Falha desconhecida.")}</span></div>` : ""}
       </div>
       ${!a ? `<div class="empty-state"><div class="big">Sem resultado estruturado</div><p>Esta análise não produziu um resultado válido.</p></div>` : `
@@ -2122,6 +2153,13 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
 
   const renderTabContent = () => {
     if (activeTab === "resumo") {
+      // Custo agregado desta PopulationRun: soma o custo REAL (nunca
+      // estimado) de cada ReadingRun filha que já retornou tokenUsage —
+      // nunca mistura com o custo do Research Analyst (ver renderAnalysisReport).
+      const runsWithCost = runs.filter((r) => r.requestMetadata?.actualCost);
+      const totalCost = runsWithCost.reduce((sum, r) => sum + r.requestMetadata.actualCost.totalCost, 0);
+      const currency = runsWithCost[0]?.requestMetadata?.actualCost?.currency || "";
+      const requestedModelId = popRun.requestedModelId || runs.find((r) => r.requestMetadata?.requestedModelId)?.requestMetadata?.requestedModelId;
       return `
         <div class="cards" style="margin-bottom:16px">
           <div class="card stat-card"><span class="stat-num">${total}</span><span class="stat-label">Leitores</span></div>
@@ -2132,6 +2170,14 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
           <div class="kv" style="margin-bottom:6px"><b class="muted">Survey:</b>&nbsp;${esc(survey ? survey.name : "(pesquisa removida)")}</div>
           <div class="kv" style="margin-bottom:6px"><b class="muted">Modelo:</b>&nbsp;${esc(popRun.provider)} / ${esc(popRun.model)} · prompt ${esc(popRun.promptVersion)}</div>
           <div class="kv"><b class="muted">Tempo total:</b>&nbsp;${fmtDuration(popRun.startedAt, popRun.completedAt)}</div>
+        </div>
+        <div class="card" style="margin-top:12px">
+          <div class="section-title" style="margin-top:0">Custo desta PopulationRun</div>
+          ${requestedModelId ? `
+          <div class="kv" style="margin-bottom:6px"><b class="muted">Modelo selecionado:</b>&nbsp;<span class="mono">${esc(requestedModelId)}</span></div>
+          <div class="kv" style="margin-bottom:6px"><b class="muted">Leitores com custo real apurado:</b>&nbsp;${runsWithCost.length} de ${total}</div>
+          <div class="kv"><b class="muted">Custo total (real, acumulado):</b>&nbsp;${runsWithCost.length ? `${totalCost.toLocaleString("pt-BR", { maximumFractionDigits: 4 })} ${esc(currency)}` : "—"}${runsWithCost.length && runsWithCost.length < total ? ` <span class="faint small">(parcial — ainda faltam leitores concluir)</span>` : ""}</div>
+          ` : `<p class="muted small">Informação de custo não disponível para esta execução.</p>`}
         </div>`;
     }
     if (activeTab === "heatmap") return renderHeatmapTab();
@@ -2327,12 +2373,27 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
     if (activeTab === "analise") {
       main.querySelector("#analysis-generate")?.addEventListener("click", async () => {
         if (analysisRunning) return;
-        analysisRunning = true;
-        renderAll();
         const cfg = getLLMConfig();
         const mode = cfg.endpoint ? "llm" : "demo";
         const liveCfg = mode === "llm" ? cfg : null;
-        const { ok, analysisRun } = await runPopulationAnalysis(popRun, { mode, liveCfg, segments: activeSegmentsForAnalysis() });
+
+        // Seleção EXPLÍCITA de modelo do Research Analyst — SEPARADA da
+        // seleção usada pelas ReadingRuns da mesma PopulationRun (ver
+        // components/llmExecutionDialog.js). Cancelar aborta a análise.
+        let modelSelection = null;
+        if (mode === "llm") {
+          modelSelection = await showLLMExecutionDialog({
+            purpose: "analyst",
+            estimatedInputTokens: Math.ceil(ANALYST_TARGET_PROMPT_CHARS / 3),
+            estimatedOutputTokens: DEFAULT_EXPECTED_ANALYST_OUTPUT_TOKENS,
+            runs: S.state.analysisRuns,
+          });
+          if (!modelSelection) return;
+        }
+
+        analysisRunning = true;
+        renderAll();
+        const { ok, analysisRun } = await runPopulationAnalysis(popRun, { mode, liveCfg, segments: activeSegmentsForAnalysis(), modelId: modelSelection?.modelId, modelPricing: modelSelection?.pricing });
         analysisRunning = false;
         selectedAnalysisId = analysisRun.id;
         if (ok) toast("Análise gerada com sucesso.", "ok");
@@ -2643,9 +2704,28 @@ function viewNewRun(main) {
     run.provider = isDemo ? "demo-local" : liveCfg.provider;
     run.model = isDemo ? "simulador-v1" : ""; // preenchido com o modelo real após a resposta do servidor
     run.promptVersion = liveCfg.promptVersion;
+
+    // Seleção EXPLÍCITA de modelo (ver components/llmExecutionDialog.js) —
+    // só para execuções reais; cancelar o diálogo aborta a execução, nunca
+    // cai num modelo padrão silenciosamente.
+    let modelSelection = null;
+    if (!isDemo) {
+      modelSelection = await showLLMExecutionDialog({
+        purpose: "reader",
+        estimatedInputTokens: estimateTokensConservative(text),
+        estimatedOutputTokens: DEFAULT_EXPECTED_READER_OUTPUT_TOKENS,
+        runs: S.state.runs,
+      });
+      if (!modelSelection) {
+        executing = false;
+        btn.disabled = false;
+        btn.textContent = "Executar leitura";
+        return;
+      }
+    }
     await S.saveRun(run);
 
-    const { ok } = await executeReadingRun(run, { persona, survey, mode, liveCfg });
+    const { ok } = await executeReadingRun(run, { persona, survey, mode, liveCfg, modelId: modelSelection?.modelId, modelPricing: modelSelection?.pricing });
     if (ok) toast("Leitura concluída e resultado persistido.", "ok");
     else toast(run.errorMessage, "bad");
     location.hash = "#/execucoes/" + run.id;

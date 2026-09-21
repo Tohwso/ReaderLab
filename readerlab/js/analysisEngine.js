@@ -15,6 +15,7 @@ import { buildResearchAnalystPrompt } from "./llm/researchAnalystPromptBuilder.j
 import { validateResearchAnalysis, RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION } from "./llm/researchAnalystValidate.js";
 import { DemoResearchAnalystProvider } from "./llm/demoResearchAnalyst.js";
 import { estimateTokensConservative } from "./llm/tokenEstimate.js";
+import { buildModelPricingSnapshot, estimateCostForTokens, computeActualCost } from "./llm/costEstimate.js";
 import {
   ANALYST_MAX_PROMPT_CHARS,
   ANALYST_TARGET_PROMPT_CHARS,
@@ -25,6 +26,7 @@ import {
   ANALYST_REACTION_SAMPLE_MAX_CHARS,
   ANALYST_REASONING_EFFORT,
   ANALYST_MAX_COMPLETION_TOKENS,
+  DEFAULT_EXPECTED_ANALYST_OUTPUT_TOKENS,
 } from "./config.js";
 
 // Pipeline de uma tentativa: LLM → parse JSON → schema → evidence semântica
@@ -37,7 +39,7 @@ const MAX_ATTEMPTS = 2;
 // sobrescreve uma análise anterior, o histórico é sempre preservado.
 // `segments`: lista opcional de { name, rules } vinda da aba Segmentos do
 // hub (só os segmentos efetivamente configurados pelo usuário).
-export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = [] } = {}) {
+export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = [], modelId, modelPricing } = {}) {
   const isDemo = mode === "demo";
   // PopulationAnalysisDataset completo — NUNCA destruído/substituído, é a
   // fonte de verdade preservada no ReaderLab. O Research Analyst nunca vê
@@ -101,6 +103,21 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     // reaproveitados de LLM_READER_*, ver comentário em config.js).
     reasoningEffort: ANALYST_REASONING_EFFORT,
     maxCompletionTokens: ANALYST_MAX_COMPLETION_TOKENS,
+    purpose: "analyst",
+    // Seleção EXPLÍCITA de modelo para o Research Analyst — SEPARADA da
+    // seleção de modelo das ReadingRuns da mesma PopulationRun (nunca a
+    // mesma escolha/custo, ver seção 25 da tarefa "model catalog").
+    ...(!isDemo && modelId && modelPricing
+      ? {
+          requestedModelId: modelId,
+          modelPricingSnapshot: buildModelPricingSnapshot(modelPricing),
+          estimatedCost: estimateCostForTokens({
+            pricing: modelPricing,
+            estimatedInputTokens: estimateTokensConservative(user),
+            estimatedOutputTokens: DEFAULT_EXPECTED_ANALYST_OUTPUT_TOKENS,
+          }),
+        }
+      : {}),
   };
   await S.saveAnalysisRun(analysisRun);
 
@@ -140,10 +157,13 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
       // tentativas do Analyst, inclusive o retry de correção após
       // INVALID_EVIDENCE — nunca aumentados automaticamente entre
       // tentativas (truncamento nunca é "corrigido" com mais tokens em loop).
+      // purpose: "analyst" NUNCA muda para "reader" no retry — mantém o
+      // Research Analyst sempre roteado para LLM_ANALYST_MODEL no servidor.
       const res = await provider.complete({
         systemPrompt: system,
         userPrompt,
-        ...(isDemo ? {} : { reasoningEffort: ANALYST_REASONING_EFFORT, maxCompletionTokens: ANALYST_MAX_COMPLETION_TOKENS }),
+        purpose: "analyst",
+        ...(isDemo ? {} : { modelId, reasoningEffort: ANALYST_REASONING_EFFORT, maxCompletionTokens: ANALYST_MAX_COMPLETION_TOKENS }),
       });
       model = res.model;
       usage = res.usage;
@@ -171,7 +191,11 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     }
 
     if (!isDemo && model) analysisRun.model = model;
-    if (usage) analysisRun.requestMetadata = { ...analysisRun.requestMetadata, tokenUsage: usage };
+    if (usage) {
+      analysisRun.requestMetadata = { ...analysisRun.requestMetadata, tokenUsage: usage };
+      const actualCost = computeActualCost({ pricingSnapshot: analysisRun.requestMetadata.modelPricingSnapshot, usage });
+      if (actualCost) analysisRun.requestMetadata = { ...analysisRun.requestMetadata, actualCost };
+    }
     analysisRun.requestMetadata = { ...analysisRun.requestMetadata, attempts: attempt, retried: attempt > 1, finishReason: lastFinishReason };
 
     if (!value) {

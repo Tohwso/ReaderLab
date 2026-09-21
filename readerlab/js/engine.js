@@ -14,8 +14,9 @@ import { DemoProvider } from "./llm/demoProvider.js";
 import { runWithRetry } from "./llm/retry.js";
 import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
 import { estimateTokensConservative } from "./llm/tokenEstimate.js";
-import { LLM_READER_REASONING_EFFORT, LLM_READER_MAX_COMPLETION_TOKENS } from "./config.js";
+import { LLM_READER_REASONING_EFFORT, LLM_READER_MAX_COMPLETION_TOKENS, DEFAULT_EXPECTED_READER_OUTPUT_TOKENS } from "./config.js";
 import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
+import { buildModelPricingSnapshot, estimateCostForTokens, computeActualCost } from "./llm/costEstimate.js";
 
 // Executa uma ReadingRun até seu status final (COMPLETED|FAILED) — ou a
 // deixa estacionada em WAITING_RETRY aguardando `run.nextRetryAt` (ver
@@ -45,7 +46,7 @@ import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
 // interrompe a espera sem marcar a run como FAILED (ver runPopulationLoop:
 // usado para que uma PopulationRun cancelada nunca inicie uma nova
 // tentativa de uma ReadingRun que estava em WAITING_RETRY).
-export async function executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg, isCancelled = () => false }) {
+export async function executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg, isCancelled = () => false, modelId, modelPricing }) {
   const isResume = run.status === "WAITING_RETRY";
   if (!isResume) {
     run.status = "RUNNING";
@@ -71,10 +72,26 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
       reactionCount: activeReactions.length,
       questionCount: survey.questions.length,
       snapshotVersion: 1,
+      purpose: "reader",
       // Parâmetros efetivamente enviados ao provider real nesta execução —
       // ausente em demo (não bate em API nenhuma). Fonte única de verdade:
       // js/config.js (nunca hardcoded aqui, ver LLM_READER_*).
       ...(isDemo ? {} : { readerLLMParams: { reasoningEffort: LLM_READER_REASONING_EFFORT, maxCompletionTokens: LLM_READER_MAX_COMPLETION_TOKENS } }),
+      // Seleção EXPLÍCITA de modelo (ver js/components/llmExecutionDialog.js) —
+      // `modelPricingSnapshot` é uma cópia CONGELADA do preço do catálogo no
+      // momento desta execução (nunca a referência viva do catálogo — futuras
+      // atualizações de preço nunca alteram o custo já registrado aqui).
+      ...(!isDemo && modelId && modelPricing
+        ? {
+            requestedModelId: modelId,
+            modelPricingSnapshot: buildModelPricingSnapshot(modelPricing),
+            estimatedCost: estimateCostForTokens({
+              pricing: modelPricing,
+              estimatedInputTokens: estimateTokensConservative(system + user),
+              estimatedOutputTokens: DEFAULT_EXPECTED_READER_OUTPUT_TOKENS,
+            }),
+          }
+        : {}),
     };
     const provider = isDemo
       ? new DemoProvider({ persona, attributes: attributeCatalog, reactions: activeReactions, survey })
@@ -88,7 +105,8 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     const callProvider = () => provider.complete({
       systemPrompt: system,
       userPrompt: user,
-      ...(isDemo ? {} : { reasoningEffort: LLM_READER_REASONING_EFFORT, maxCompletionTokens: LLM_READER_MAX_COMPLETION_TOKENS }),
+      purpose: "reader",
+      ...(isDemo ? {} : { modelId, reasoningEffort: LLM_READER_REASONING_EFFORT, maxCompletionTokens: LLM_READER_MAX_COMPLETION_TOKENS }),
     });
     const guardedCall = isDemo ? callProvider : () => kimiRateLimitManager.run(callProvider, {
       isCancelled,
@@ -154,7 +172,15 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     // usage vem do provider real (prompt_tokens/completion_tokens/total_tokens,
     // ou nomenclatura equivalente do backend) — nunca disponível em demo.
     // Persistido para observabilidade/otimização futura (ver requestMetadata).
-    if (usage) run.requestMetadata = { ...run.requestMetadata, tokenUsage: usage };
+    if (usage) {
+      run.requestMetadata = { ...run.requestMetadata, tokenUsage: usage };
+      // Custo REAL (ver js/llm/costEstimate.js) — só calculável quando havia
+      // um pricing snapshot congelado (seleção explícita de modelo) e o
+      // provider retornou tokenUsage; nunca recalcula a partir do preço
+      // "atual" do catálogo.
+      const actualCost = computeActualCost({ pricingSnapshot: run.requestMetadata.modelPricingSnapshot, usage });
+      if (actualCost) run.requestMetadata = { ...run.requestMetadata, actualCost };
+    }
     // Mecanismo de contrato de saída efetivamente usado nesta chamada (ver
     // supabase/functions/llm-proxy — "json_mode" | "prompt_only"), decidido
     // pelo servidor, nunca pelo frontend. Permite comparar taxas de
@@ -224,6 +250,7 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
 // "retomar" uma execução que a própria submissão do formulário já está
 // rodando em background).
 const inFlight = new Set();
+const isDemoMode = (mode) => mode === "demo";
 
 // Núcleo do laço sequencial, compartilhado entre início e retomada: opera
 // sempre sobre a lista de Personas congelada em popRun.executionSnapshot
@@ -285,7 +312,14 @@ async function runPopulationLoop(popRun, { mode, liveCfg, onProgress }) {
     }
     onProgress?.({ phase: "start", persona, run, total });
     const isCancelled = () => (S.state.populationRuns.find((p) => p.id === popRun.id) || popRun).status === "CANCELLED";
-    const { ok } = await executeReadingRun(run, { persona, survey, attributes, reactions, mode, liveCfg, isCancelled });
+    // modelId/modelPricing vêm SEMPRE de popRun (congelados uma única vez em
+    // executePopulationRun, antes da 1ª Persona) — nunca reselecionados por
+    // Persona, e idênticos numa retomada (resumePopulationRun) porque já
+    // estão persistidos em popRun, não num parâmetro efêmero desta chamada.
+    const { ok } = await executeReadingRun(run, {
+      persona, survey, attributes, reactions, mode, liveCfg, isCancelled,
+      modelId: popRun.requestedModelId, modelPricing: popRun.modelPricingSnapshot,
+    });
     onProgress?.({ phase: "done", persona, run, ok, total });
 
     // O modelo efetivamente usado só é conhecido após a 1ª resposta real do
@@ -324,12 +358,20 @@ async function runPopulationLoop(popRun, { mode, liveCfg, onProgress }) {
 // S.state.* diretamente — é exatamente o instante em que a configuração é
 // congelada; depois disso, runPopulationLoop() nunca mais toca em S.state
 // para montar uma execução (só para checar cancelamento/progresso).
-export async function executePopulationRun(popRun, { population, personas, survey, mode, liveCfg, onProgress }) {
+export async function executePopulationRun(popRun, { population, personas, survey, mode, liveCfg, onProgress, modelId, modelPricing }) {
   if (inFlight.has(popRun.id)) return popRun;
   inFlight.add(popRun.id);
   try {
     popRun.status = "RUNNING";
     popRun.startedAt = D.nowISO();
+    // Congela a seleção de modelo UMA ÚNICA VEZ para toda a PopulationRun —
+    // toda Persona (runPopulationLoop) e qualquer retomada futura reusam
+    // exatamente isto, nunca uma nova seleção por Persona (ver critério
+    // "PopulationRun inteira usa o mesmo modelId congelado").
+    if (!isDemoMode(mode) && modelId && modelPricing) {
+      popRun.requestedModelId = modelId;
+      popRun.modelPricingSnapshot = buildModelPricingSnapshot(modelPricing);
+    }
     const activeReactions = S.state.reactions.filter((r) => r.status === "ativa");
     popRun.executionSnapshot = D.buildPopulationExecutionSnapshot({
       population, personas, survey, reactions: activeReactions, attributes: S.state.attributes,

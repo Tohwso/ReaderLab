@@ -261,6 +261,39 @@ function renderEvaluatedText(inputText) {
     </details>`;
 }
 
+// -------------------------------------------------------------- Custo da execução
+// Bloco human-readable (nunca só o requestMetadata cru) — seção 23 da
+// tarefa "model catalog". Execuções antigas (sem requestedModelId, de
+// antes desta feature) nunca tentam recalcular nada retroativamente: só
+// mostram o aviso de indisponibilidade.
+function renderCostBlock(run) {
+  const meta = run.requestMetadata;
+  if (!meta || !meta.requestedModelId) {
+    return `
+    <div class="card" style="margin-top:16px">
+      <div class="section-title" style="margin-top:0">Custo estimado/real</div>
+      <p class="muted small">Informação de custo não disponível para esta execução.</p>
+    </div>`;
+  }
+  const currency = meta.actualCost?.currency || meta.estimatedCost?.currency || meta.modelPricingSnapshot?.currency || "";
+  const fmt = (n) => typeof n === "number" ? n.toLocaleString("pt-BR", { maximumFractionDigits: 4 }) : "—";
+  return `
+    <div class="card" style="margin-top:16px">
+      <div class="section-title" style="margin-top:0">Custo estimado/real</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 18px">
+        <div><div class="faint small">MODELO</div><span class="mono small">${esc(meta.requestedModelId)}</span></div>
+        ${meta.actualCost ? `
+        <div><div class="faint small">TOKENS INPUT</div><span class="mono small">${esc(String(meta.actualCost.promptTokens))}</span></div>
+        <div><div class="faint small">TOKENS OUTPUT</div><span class="mono small">${esc(String(meta.actualCost.completionTokens))}</span></div>
+        <div><div class="faint small">CUSTO REAL</div><span class="mono small">${fmt(meta.actualCost.totalCost)} ${esc(currency)}</span></div>
+        ` : `
+        <div><div class="faint small">CUSTO ESTIMADO</div><span class="mono small">${meta.estimatedCost ? `${fmt(meta.estimatedCost.totalCost)} ${esc(currency)}` : "—"}</span></div>
+        `}
+      </div>
+      ${!meta.actualCost ? `<p class="muted small" style="margin-top:10px">Custo real indisponível — provider não retornou token usage.</p>` : ""}
+    </div>`;
+}
+
 // ---------------------------------------------------------- Detalhes técnicos
 function renderTechnicalDetails(run, result, snap) {
   const parsedRaw = tryParseJSON(run.rawResponse);
@@ -346,6 +379,7 @@ export function renderRunResultView(main, run, result, { toast, backContext } = 
     ${reportBody}
     ${renderPersonaDetails(persona, attributeDefs)}
     ${renderEvaluatedText(run.inputText)}
+    ${renderCostBlock(run)}
     ${renderTechnicalDetails(run, result, snap)}
   `;
 

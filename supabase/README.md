@@ -98,7 +98,9 @@ autorização por dono e CORS por allowlist (ver "Segurança" abaixo).
 supabase functions deploy llm-proxy
 supabase secrets set LLM_API_KEY=sk-...                                  # obrigatório
 supabase secrets set LLM_API_BASE_URL=https://api.moonshot.ai/v1         # opcional (default: OpenAI)
-supabase secrets set LLM_MODEL=kimi-k3                                   # opcional (default: gpt-4o-mini)
+supabase secrets set LLM_READER_MODEL=kimi-k3                            # opcional — modelo das ReadingRuns (default: LLM_MODEL, depois gpt-4o-mini)
+supabase secrets set LLM_ANALYST_MODEL=kimi-k2.6                         # opcional — modelo do Research Analyst (default: LLM_MODEL, depois gpt-4o-mini)
+supabase secrets set LLM_MODEL=kimi-k3                                   # legado — fallback comum quando o específico acima não está configurado
 supabase secrets set READERLAB_OWNER_USER_ID=<uuid-do-seu-usuario>       # obrigatório
 supabase secrets set READERLAB_ALLOWED_ORIGINS=https://<seu-usuario>.github.io,http://localhost:5173  # obrigatório
 ```
@@ -118,10 +120,16 @@ nos secrets da função.
 - **CORS:** sem `Access-Control-Allow-Origin: *`. Só as origens listadas em
   `READERLAB_ALLOWED_ORIGINS` (separadas por vírgula) recebem os headers de
   CORS; outras origens são bloqueadas (`403`) já no preflight.
-- **Modelo/URL fixos no servidor:** o frontend manda apenas
-  `{ systemPrompt, userPrompt, reasoning_effort? }` — nunca `model`,
-  `baseUrl` ou `messages` arbitrários. `LLM_API_BASE_URL`/`LLM_MODEL` só
-  existem como secrets do servidor.
+- **Modelo/URL fixos no servidor, com seleção explícita opcional via allowlist:**
+  o frontend manda `{ systemPrompt, userPrompt, purpose?, modelId?, reasoning_effort? }`
+  — nunca `baseUrl` ou `messages` arbitrários. `purpose` (`"reader"` ou
+  `"analyst"`, default `"reader"`) escolhe QUAL secret de modelo é usado
+  quando `modelId` não é enviado (`LLM_READER_MODEL`/`LLM_ANALYST_MODEL`,
+  com `LLM_MODEL` como fallback comum). Se o cliente enviar `modelId`, ele
+  só é aceito se existir no **Model Catalog** (`functions/llm-proxy/modelCatalog.mjs`,
+  allowlist fixa no servidor), estiver `active` e for adequado ao `purpose`
+  enviado — caso contrário a requisição falha com `400 invalid_request` e
+  **nunca** há substituição silenciosa por outro modelo. Ver seção 7.
 - **Payload limitado:** `systemPrompt`/`userPrompt` precisam ser strings
   não vazias, com tamanho máximo (20k/200k caracteres) para evitar abuso
   acidental; `reasoning_effort`, se enviado, só aceita `low`/`medium`/`high`/`max`.
@@ -130,7 +138,59 @@ nos secrets da função.
 - **Logs:** a função nunca loga o texto do manuscrito/prompt, só código e
   mensagem curta de erros do upstream.
 
-## 6. Rodar localmente (opcional)
+## 6. Model Catalog, seleção de modelo e custo (estimado e real)
+
+Desde a task "seleção explícita de modelo LLM + catálogo + custo", toda
+execução real de LLM (ReadingRun avulsa, PopulationRun, Research Analyst)
+mostra ao usuário um diálogo (`readerlab/js/components/llmExecutionDialog.js`)
+para escolher explicitamente o modelo ANTES de disparar a chamada — o app
+**nunca** escolhe "o melhor"/"o mais barato" modelo sozinho, e cancelar o
+diálogo aborta a execução (sem fallback silencioso para nenhum modelo).
+
+- **Catálogo (allowlist do servidor):** [`functions/llm-proxy/modelCatalog.mjs`](./functions/llm-proxy/modelCatalog.mjs)
+  — lista fixa de modelos permitidos (hoje: `kimi-k2.6`, `kimi-k3`), cada um
+  com `active`, `capabilities` (inclui se é adequado para `purpose:"reader"`
+  e/ou `"analyst"`) e `pricing` (`currency`, `inputPerMillionTokens`,
+  `outputPerMillionTokens`, `cachedInputPerMillionTokens` — `null` até
+  confirmarmos o valor real do provedor, nunca um chute — e
+  `pricingUpdatedAt`). **Para adicionar/atualizar um modelo, edite só este
+  arquivo** (não precisa mexer em `index.ts`).
+- **Descoberta (discovery):** `GET ?action=models` ou `POST {"action":"models"}`
+  no mesmo endpoint `llm-proxy` — o servidor consulta `${LLM_API_BASE_URL}/models`
+  no provedor (nunca expõe API key/baseUrl ao cliente) e retorna a
+  interseção com o catálogo local `active`; se a consulta ao provedor
+  falhar, retorna o catálogo `active` completo com `availabilityUnverified: true`
+  em vez de quebrar a tela.
+- **Seleção do modelo pelo cliente:** o body pode incluir `modelId?: string`.
+  O servidor valida com `validateRequestedModel({modelId, purpose})` (existe
+  no catálogo + `active` + adequado ao `purpose`) — se inválido, `400
+  invalid_request`; nunca há substituição automática por outro modelo.
+- **Custo estimado** (antes da execução): `readerlab/js/llm/costEstimate.js`
+  calcula a partir do preço do catálogo + uma estimativa conservadora de
+  tokens de entrada/saída — mostrado no próprio diálogo de seleção.
+- **Custo real** (depois da execução): calculado a partir do `usage`
+  (`prompt_tokens`/`completion_tokens`) que o provedor de fato retornou,
+  usando uma "pricing snapshot" **congelada** no momento da execução
+  (`buildModelPricingSnapshot` — cópia independente, nunca uma referência
+  viva do catálogo) — então uma atualização de preço no catálogo nunca
+  altera o custo já registrado de execuções passadas. Persistido em
+  `run.requestMetadata`/`analysisRun.requestMetadata` (`requestedModelId`,
+  `modelPricingSnapshot`, `estimatedCost`, `actualCost`) e exibido no
+  relatório de leitura, no resumo da PopulationRun (soma de todos os
+  leitores) e no relatório do Research Analyst (linha separada, nunca
+  somada ao custo dos leitores).
+- **PopulationRun:** o modelo é escolhido **uma única vez** para toda a
+  execução (não por Persona) — congelado em campos top-level `popRun.
+  requestedModelId`/`popRun.modelPricingSnapshot`, reusados por toda
+  Persona inclusive ao retomar (`resumePopulationRun`).
+- **Execuções antigas** (antes desta feature, sem `requestedModelId`)
+  mostram "Informação de custo não disponível para esta execução." — nunca
+  tentam calcular um custo retroativo.
+- Nenhuma conversão de moeda é feita; nenhum "melhor modelo" é sugerido
+  automaticamente; nenhum scraping de página de preços — os valores em
+  `modelCatalog.mjs` são mantidos manualmente.
+
+## 7. Rodar localmente (opcional)
 
 ```
 supabase start                       # Postgres + Auth + Functions locais

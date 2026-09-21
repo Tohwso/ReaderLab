@@ -68,7 +68,13 @@ export function providerErrorMessage(err) {
 }
 
 // Interface conceitual LLMProvider:
-//   complete({ systemPrompt, userPrompt, reasoningEffort?, maxCompletionTokens? }) -> { content: string, raw: any }
+//   complete({ systemPrompt, userPrompt, purpose?, modelId?, reasoningEffort?, maxCompletionTokens? }) -> { content: string, raw: any }
+// `purpose` ("reader" | "analyst") diz ao servidor QUAL modelo usar por
+// padrão (LLM_READER_MODEL/LLM_ANALYST_MODEL, ver supabase/functions/llm-proxy)
+// quando `modelId` não é enviado. `modelId` (opcional) é a seleção EXPLÍCITA
+// do usuário (ver Model Catalog, js/llm/modelCatalog.js) — validada no
+// servidor contra o catálogo (existir + estar ativo + ser compatível com a
+// `purpose`); nunca um nome de modelo arbitrário aceito sem checagem.
 // `reasoningEffort`/`maxCompletionTokens` são OPCIONAIS e nunca têm default
 // aqui — quem decide enviá-los é o chamador (ex.: engine.js, só para
 // ReadingRuns, usando js/config.js como única fonte de verdade). Isso
@@ -79,7 +85,7 @@ export class KimiProvider {
     this.cfg = cfg;
   }
 
-  async complete({ systemPrompt, userPrompt, reasoningEffort, maxCompletionTokens }) {
+  async complete({ systemPrompt, userPrompt, purpose, modelId, reasoningEffort, maxCompletionTokens }) {
     if (!this.cfg.endpoint) {
       throw new ProviderError(
         "NOT_CONFIGURED",
@@ -106,6 +112,8 @@ export class KimiProvider {
         body: JSON.stringify({
           systemPrompt,
           userPrompt,
+          ...(purpose ? { purpose } : {}),
+          ...(modelId ? { modelId } : {}),
           ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
           ...(maxCompletionTokens ? { max_completion_tokens: maxCompletionTokens } : {}),
         }),
@@ -169,4 +177,64 @@ export class KimiProvider {
 // (OpenAIProvider, AnthropicProvider, GeminiProvider, LocalModelProvider).
 export function getProvider(cfg = getLLMConfig()) {
   return new KimiProvider(cfg);
+}
+
+// Discovery do Model Catalog (ver supabase/functions/llm-proxy/modelCatalog.mjs
+// e js/llm/modelCatalog.js, que envolve esta função com cache) — nunca
+// retorna a lista crua do provider, só a interseção sanitizada que o
+// servidor já calculou. `availabilityUnverified: true` sinaliza que o
+// servidor não conseguiu confirmar contra o provider agora (upstream fora
+// do ar) e está retornando o catálogo conhecido mesmo assim — nunca quebra
+// a tela por causa disso, quem decide como exibir é o chamador.
+export async function fetchAvailableModels(cfg = getLLMConfig()) {
+  if (!cfg.endpoint) {
+    throw new ProviderError(
+      "NOT_CONFIGURED",
+      "Nenhum backend LLM configurado. Conecte um proxy seguro para consultar os modelos disponíveis.",
+      { errorType: LLM_ERROR_TYPES.INVALID_REQUEST }
+    );
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  const token = getAccessToken() || getAnonKey();
+
+  let res;
+  try {
+    res = await fetch(cfg.endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ action: "models" }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (err && err.name === "AbortError") {
+      throw new ProviderError("TIMEOUT", `A consulta de modelos excedeu o limite de ${Math.round(cfg.timeoutMs / 1000)}s.`, { errorType: LLM_ERROR_TYPES.TIMEOUT });
+    }
+    throw new ProviderError("NETWORK", "Falha de rede ao consultar os modelos disponíveis.", { errorType: LLM_ERROR_TYPES.NETWORK_ERROR });
+  }
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    let body = null;
+    try { body = await res.json(); } catch (_) { /* corpo não-JSON — segue sem detalhe extra */ }
+    const message = typeof body?.message === "string" ? body.message : `Falha ao consultar modelos disponíveis (HTTP ${res.status}).`;
+    throw new ProviderError("HTTP", message, { errorType: LLM_ERROR_TYPES.SERVER_ERROR });
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch (_) {
+    throw new ProviderError("INVALID_JSON", "Resposta inválida do backend ao consultar modelos (não era JSON).", { errorType: LLM_ERROR_TYPES.SERVER_ERROR });
+  }
+
+  return {
+    models: Array.isArray(data?.models) ? data.models : [],
+    availabilityUnverified: data?.availabilityUnverified === true,
+  };
 }

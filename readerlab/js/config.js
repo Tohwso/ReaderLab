@@ -151,3 +151,12 @@ export const ANALYST_TARGET_PROMPT_CHARS = numberOverride("READERLAB_ANALYST_TAR
 export const ANALYST_REASONING_EFFORT = stringOverride("READERLAB_ANALYST_REASONING_EFFORT", "low", ["low", "high", "max"]);
 export const ANALYST_MAX_COMPLETION_TOKENS = numberOverride("READERLAB_ANALYST_MAX_COMPLETION_TOKENS", 8000);
 
+// Estimativas padrão de tokens de SAÍDA (ver js/llm/costEstimate.js) usadas
+// SOMENTE quando ainda não há histórico de execuções reais para o par
+// {purpose, modelId} — nunca usadas para truncar/limitar nada, só para
+// calcular um custo estimado aproximado antes da execução. Assim que
+// existirem execuções reais, getHistoricalUsageStats() prefere a média
+// observada a este chute inicial.
+export const DEFAULT_EXPECTED_READER_OUTPUT_TOKENS = numberOverride("READERLAB_DEFAULT_EXPECTED_READER_OUTPUT_TOKENS", 900);
+export const DEFAULT_EXPECTED_ANALYST_OUTPUT_TOKENS = numberOverride("READERLAB_DEFAULT_EXPECTED_ANALYST_OUTPUT_TOKENS", 3500);
+

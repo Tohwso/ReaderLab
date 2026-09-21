@@ -5,13 +5,18 @@
 // Continua sendo a única peça do backend que conhece o secret da API de
 // LLM — model/base URL/API key nunca vêm do frontend.
 //
-// Contrato de entrada: { systemPrompt: string, userPrompt: string, reasoning_effort?: string, max_completion_tokens?: number }
+// Contrato de entrada: { systemPrompt: string, userPrompt: string, purpose?: "reader"|"analyst", modelId?: string, reasoning_effort?: string, max_completion_tokens?: number }
+//                    ou { action: "models" } (discovery do Model Catalog, ver abaixo)
 // Contrato de saída:   { content: string, model: string, structuredOutputMode: string, usage?: {...}, finish_reason?: string }
 //
 // Segredos (definir com `supabase secrets set ...`, nunca no código):
 //   LLM_API_KEY               — obrigatório, API key do provedor de LLM.
 //   LLM_API_BASE_URL          — ex.: "https://api.moonshot.ai/v1". Default: OpenAI.
-//   LLM_MODEL                 — modelo usado nas execuções. Default: gpt-4o-mini.
+//   LLM_READER_MODEL          — modelo usado pelas ReadingRuns (ex.: "kimi-k3").
+//   LLM_ANALYST_MODEL         — modelo usado pelo Research Analyst (ex.: "kimi-k2.6").
+//   LLM_MODEL                 — legado/fallback comum a ambos quando o específico
+//                               não está configurado. Prioridade: LLM_READER_MODEL/
+//                               LLM_ANALYST_MODEL -> LLM_MODEL -> DEFAULT_MODEL.
 //   LLM_RESPONSE_FORMAT_MODE  — "json_object" (default) ou "off". Controla se
 //                               response_format é enviado ao upstream (ver
 //                               JSON Mode abaixo) — só desligar se o provider
@@ -25,10 +30,29 @@
 // (SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY já existem automaticamente no
 // ambiente de toda Edge Function — não precisam ser cadastrados.)
 //
+// `purpose` ("reader" | "analyst", default "reader" para compatibilidade
+// com chamadas antigas) restringe QUAIS modelos são elegíveis. `modelId`
+// (opcional) é a seleção EXPLÍCITA do usuário (ver Model Catalog em
+// modelCatalog.mjs) — só aceito se existir no catálogo, estiver ativo e for
+// compatível com a purpose (senão 400 invalid_request; NUNCA um fallback
+// silencioso para outro modelo). Sem `modelId`, cai no roteamento por env
+// vars (ver modelRouting.mjs) — o frontend nunca escolhe o nome do modelo
+// fora dessas duas vias controladas.
+//
+// Model discovery: { action: "models" } (POST) retorna a interseção entre o
+// Model Catalog ativo (modelCatalog.mjs) e os modelos que o provider
+// upstream efetivamente lista em GET {LLM_API_BASE_URL}/models — nunca a
+// lista crua do provider (pode conter modelos não suportados/testados), e
+// nunca a API key. Se a consulta ao upstream falhar, retorna o catálogo
+// ativo com `availabilityUnverified: true` em vez de quebrar (ver seção 30
+// da tarefa "model catalog" — abordagem conservadora, documentada).
+//
 // Deploy: supabase functions deploy llm-proxy
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeadersFor, handlePreflight, isOriginAllowed, resolveAllowedOrigins } from "../_shared/cors.ts";
+import { resolvePurpose, resolveModel, buildUpstreamPayload, validateRequestedModel } from "./modelRouting.mjs";
+import { getActiveModels, sanitizeModelForClient, intersectWithProviderModels } from "./modelCatalog.mjs";
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -96,6 +120,25 @@ async function getAuthenticatedUser(req: Request) {
   return data.user;
 }
 
+// Discovery (seção 3 da tarefa "model catalog") — consulta o endpoint
+// oficial de listagem de modelos do provider com a API key server-side.
+// Nunca propaga a key nem o corpo cru do provider; retorna só os IDs, ou
+// `null` se a consulta falhar por qualquer motivo (rede, formato
+// inesperado, upstream fora do ar) — o chamador cai para o catálogo
+// conhecido nesse caso (ver seção 30: nunca quebrar o app por isso).
+async function fetchProviderModelIds(baseUrl: string, apiKey: string): Promise<string[] | null> {
+  try {
+    const res = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${apiKey}` } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+    const ids = list.map((m: any) => m?.id).filter((id: unknown): id is string => typeof id === "string");
+    return ids;
+  } catch {
+    return null;
+  }
+}
+
 Deno.serve(async (req: Request) => {
   const allowedOrigins = resolveAllowedOrigins();
   const origin = req.headers.get("origin");
@@ -109,8 +152,18 @@ Deno.serve(async (req: Request) => {
     return json({ error: "origin_not_allowed", message: "Origem não autorizada." }, 403, cors);
   }
 
-  if (req.method !== "POST") {
-    return json({ error: "method_not_allowed", message: "Use POST." }, 405, cors);
+  const url = new URL(req.url);
+  const actionFromQuery = url.searchParams.get("action");
+
+  // GET só existe para a discovery de modelos (?action=models, ver seção 3
+  // da tarefa "model catalog") — qualquer outro uso de GET é rejeitado, e
+  // POST continua sendo o único método do contrato de conclusão.
+  if (req.method === "GET") {
+    if (actionFromQuery !== "models") {
+      return json({ error: "method_not_allowed", message: 'GET só é aceito com "?action=models".' }, 405, cors);
+    }
+  } else if (req.method !== "POST") {
+    return json({ error: "method_not_allowed", message: "Use GET (?action=models) ou POST." }, 405, cors);
   }
 
   const contentLength = Number(req.headers.get("content-length") || 0);
@@ -140,11 +193,39 @@ Deno.serve(async (req: Request) => {
     return json({ error: "forbidden", message: "Usuário não autorizado a executar leituras." }, 403, cors);
   }
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return json({ error: "invalid_json", message: "Corpo da requisição não é JSON válido." }, 400, cors);
+  // POST pode trazer { action: "models" } no lugar de systemPrompt/userPrompt
+  // — só fazemos parse do body para POST (GET de discovery não tem corpo).
+  let body: any = null;
+  if (req.method === "POST") {
+    try {
+      body = await req.json();
+    } catch {
+      return json({ error: "invalid_json", message: "Corpo da requisição não é JSON válido." }, 400, cors);
+    }
+  }
+
+  const action = actionFromQuery || body?.action;
+  if (action === "models") {
+    const apiKeyForDiscovery = Deno.env.get("LLM_API_KEY");
+    if (!apiKeyForDiscovery) {
+      return json({ error: "not_configured", message: "LLM_API_KEY não configurada no servidor (supabase secrets set)." }, 500, cors);
+    }
+    const baseUrlForDiscovery = Deno.env.get("LLM_API_BASE_URL") || DEFAULT_BASE_URL;
+    const providerModelIds = await fetchProviderModelIds(baseUrlForDiscovery, apiKeyForDiscovery);
+    const activeModels = getActiveModels();
+    // Interseção segura (seção 4 da tarefa): só o que está nos DOIS
+    // conjuntos fica selecionável. Se a consulta ao provider falhar, cai
+    // para o catálogo conhecido (nunca quebra o app) e sinaliza que a
+    // disponibilidade real não pôde ser confirmada agora.
+    const availableModels = providerModelIds ? intersectWithProviderModels(activeModels, providerModelIds) : activeModels;
+    return json(
+      {
+        models: availableModels.map(sanitizeModelForClient),
+        ...(providerModelIds ? {} : { availabilityUnverified: true }),
+      },
+      200,
+      cors
+    );
   }
 
   // 5) Payload — contrato fixo, sem aceitar messages/model/baseUrl arbitrários.
@@ -155,6 +236,25 @@ Deno.serve(async (req: Request) => {
   }
   if (systemPrompt.length > MAX_SYSTEM_PROMPT_CHARS || userPrompt.length > MAX_USER_PROMPT_CHARS) {
     return json({ error: "payload_too_large", message: "Texto excede o tamanho máximo permitido." }, 413, cors);
+  }
+  // `purpose` decide QUAL modelo server-side é usado (ver modelRouting.mjs)
+  // — nunca o nome do modelo em si, que o cliente não pode escolher.
+  const purposeResult = resolvePurpose(body?.purpose);
+  if (!purposeResult.ok) {
+    return json({ error: "invalid_request", message: purposeResult.error }, 400, cors);
+  }
+  const purpose = purposeResult.purpose as string;
+  // Seleção EXPLÍCITA do usuário (ver Model Catalog em modelCatalog.mjs) —
+  // só aceita um modelo que exista no catálogo, esteja ativo e seja
+  // compatível com `purpose`; nunca um fallback silencioso para outro
+  // modelo (seção 20 da tarefa "model catalog": sem fallback automático).
+  const requestedModelId = typeof body?.modelId === "string" && body.modelId.trim() ? body.modelId.trim() : null;
+  let requestedModelValidation: { ok: true; model: string } | { ok: false; error: string } | null = null;
+  if (requestedModelId) {
+    requestedModelValidation = validateRequestedModel({ modelId: requestedModelId, purpose });
+    if (!requestedModelValidation.ok) {
+      return json({ error: "invalid_request", message: requestedModelValidation.error }, 400, cors);
+    }
   }
   const reasoningEffort = typeof body?.reasoning_effort === "string" && ALLOWED_REASONING_EFFORTS.includes(body.reasoning_effort)
     ? body.reasoning_effort
@@ -176,22 +276,35 @@ Deno.serve(async (req: Request) => {
   }
   // 4) Modelo/base URL/provider vêm exclusivamente do servidor — o browser
   // não pode transformar isto num proxy para modelos/APIs arbitrários.
+  // Modelo resolvido a partir da `purpose` (nunca do body diretamente) —
+  // ver prioridade de env vars documentada no topo do arquivo. Sobrescrito
+  // pelo `modelId` explícito do usuário quando presente e validado acima.
   const baseUrl = Deno.env.get("LLM_API_BASE_URL") || DEFAULT_BASE_URL;
-  const model = Deno.env.get("LLM_MODEL") || DEFAULT_MODEL;
+  const model = requestedModelValidation?.ok
+    ? requestedModelValidation.model
+    : resolveModel({
+        purpose,
+        readerModelEnv: Deno.env.get("LLM_READER_MODEL") || undefined,
+        analystModelEnv: Deno.env.get("LLM_ANALYST_MODEL") || undefined,
+        legacyModelEnv: Deno.env.get("LLM_MODEL") || undefined,
+        defaultModel: DEFAULT_MODEL,
+      });
 
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
   ];
 
-  // kimi-k3 always reasons and only allows the implicit default temperature (1);
-  // sending any other value is rejected with an invalid_request_error.
-  const isKimiK3 = model === "kimi-k3";
-  const payload: Record<string, unknown> = { model, messages };
-  if (!isKimiK3) payload.temperature = 0.7;
-  if (isKimiK3) payload.reasoning_effort = reasoningEffort;
-  if (maxCompletionTokens) payload.max_completion_tokens = maxCompletionTokens;
-  if (LLM_RESPONSE_FORMAT_MODE === "json_object") payload.response_format = { type: "json_object" };
+  // Parâmetros comuns vs. específicos por modelo centralizados em
+  // modelRouting.mjs (nunca assumir que um modelo novo aceita os mesmos
+  // parâmetros do Kimi K3 — ver getModelCapabilities/buildUpstreamPayload).
+  const payload = buildUpstreamPayload({
+    model,
+    messages,
+    reasoningEffort,
+    maxCompletionTokens,
+    jsonMode: LLM_RESPONSE_FORMAT_MODE === "json_object",
+  });
   // Rótulo de observabilidade persistido pelo frontend (nunca afeta o
   // comportamento da chamada em si) — reflete exatamente o que foi enviado
   // acima, nunca um valor assumido.
