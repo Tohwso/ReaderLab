@@ -68,17 +68,57 @@ test("K) kimi-k3 -> reasoning_effort presente, SEM temperature customizada", () 
   assert.deepEqual(payload.response_format, { type: "json_object" });
 });
 
-test("L) kimi-k2.6 -> NÃO recebe reasoning_effort (parâmetro exclusivo de K3), recebe temperature (comportamento pré-existente para não-K3)", () => {
+test("L) kimi-k2.6 -> NÃO recebe reasoning_effort (parâmetro exclusivo de K3) nem temperature (K2.6 não suporta valor customizado — só 1 é aceito pelo provider)", () => {
   const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], reasoningEffort: "low", maxCompletionTokens: 8000, jsonMode: true });
   assert.equal("reasoning_effort" in payload, false);
-  assert.equal(payload.temperature, 0.7);
+  assert.equal("temperature" in payload, false);
   assert.equal(payload.max_completion_tokens, 8000);
 });
 
-test("getModelCapabilities: apenas kimi-k3 tem reasoning_effort/sem temperature customizada", () => {
+test("getModelCapabilities: reasoning_effort e temperature customizada são capabilities independentes (nenhum dos dois modelos do catálogo suporta temperature customizada)", () => {
   assert.deepEqual(getModelCapabilities("kimi-k3"), { supportsReasoningEffort: true, supportsCustomTemperature: false });
-  assert.deepEqual(getModelCapabilities("kimi-k2.6"), { supportsReasoningEffort: false, supportsCustomTemperature: true });
+  assert.deepEqual(getModelCapabilities("kimi-k2.6"), { supportsReasoningEffort: false, supportsCustomTemperature: false });
   assert.deepEqual(getModelCapabilities("gpt-4o-mini"), { supportsReasoningEffort: false, supportsCustomTemperature: true });
+});
+
+// ---- Regressão: "invalid temperature: only 1 is allowed for this model" ----
+// kimi-k2.6 chegou a receber temperature: 0.7 porque supportsCustomTemperature
+// era (incorretamente) derivado de reasoningEffort !== true. Agora é uma
+// capability explícita e independente no catálogo (customTemperature).
+test("A) kimi-k2.6 -> payload NÃO contém a propriedade temperature", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], maxCompletionTokens: 8000, jsonMode: true });
+  assert.equal("temperature" in payload, false);
+});
+
+test("B) kimi-k2.6 -> payload NÃO contém a propriedade reasoning_effort", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], reasoningEffort: "low", maxCompletionTokens: 8000, jsonMode: true });
+  assert.equal("reasoning_effort" in payload, false);
+});
+
+test("C) kimi-k2.6 -> mantém max_completion_tokens", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], maxCompletionTokens: 8000, jsonMode: true });
+  assert.equal(payload.max_completion_tokens, 8000);
+});
+
+test("D) kimi-k2.6 -> mantém response_format json_object", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], maxCompletionTokens: 8000, jsonMode: true });
+  assert.deepEqual(payload.response_format, { type: "json_object" });
+});
+
+test("E) kimi-k3 -> payload NÃO contém a propriedade temperature", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k3", messages: [], reasoningEffort: "low", maxCompletionTokens: 8000, jsonMode: true });
+  assert.equal("temperature" in payload, false);
+});
+
+test("F) kimi-k3 -> mantém reasoning_effort", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k3", messages: [], reasoningEffort: "medium", maxCompletionTokens: 8000, jsonMode: true });
+  assert.equal(payload.reasoning_effort, "medium");
+});
+
+test("G) capability de temperature customizada não é inferida a partir de reasoningEffort (kimi-k2.6 tem reasoningEffort=false e MESMO ASSIM não suporta temperature)", () => {
+  const caps = getModelCapabilities("kimi-k2.6");
+  assert.equal(caps.supportsReasoningEffort, false);
+  assert.equal(caps.supportsCustomTemperature, false);
 });
 
 test("maxCompletionTokens ausente/0 nunca aparece no payload", () => {

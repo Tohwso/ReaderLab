@@ -46,12 +46,15 @@ export function resolveModel({ purpose, readerModelEnv, analystModelEnv, legacyM
 // `if (model === ...)` aqui); modelos fora do catálogo (ex.: DEFAULT_MODEL
 // legado da OpenAI) caem no comportamento conservador que já existia antes
 // do catálogo — nunca especulamos capacidades de um modelo desconhecido.
+// reasoningEffort e customTemperature são capabilities INDEPENDENTES —
+// nunca derivar uma da outra (ver capabilities.customTemperature explícito
+// no catálogo; um modelo pode não suportar nenhuma, ambas, ou só uma).
 export function getModelCapabilities(model) {
   const catalogEntry = findModel(model);
   if (catalogEntry) {
     return {
       supportsReasoningEffort: catalogEntry.capabilities.reasoningEffort === true,
-      supportsCustomTemperature: catalogEntry.capabilities.reasoningEffort !== true,
+      supportsCustomTemperature: catalogEntry.capabilities.customTemperature === true,
     };
   }
   if (model === "kimi-k3") {
