@@ -16,7 +16,7 @@ import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
 import { estimateTokensConservative } from "./llm/tokenEstimate.js";
 import { LLM_READER_REASONING_EFFORT, LLM_READER_MAX_COMPLETION_TOKENS, DEFAULT_EXPECTED_READER_OUTPUT_TOKENS } from "./config.js";
 import { LLM_ERROR_TYPES, sanitizeErrorMessage } from "./llm/errorTypes.js";
-import { buildModelPricingSnapshot, estimateCostForTokens, computeActualCost } from "./llm/costEstimate.js";
+import { buildModelPricingSnapshot, estimateCostForTokens, computeActualCost, sumTokenUsage } from "./llm/costEstimate.js";
 
 // Executa uma ReadingRun até seu status final (COMPLETED|FAILED) — ou a
 // deixa estacionada em WAITING_RETRY aguardando `run.nextRetryAt` (ver
@@ -73,6 +73,14 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
       questionCount: survey.questions.length,
       snapshotVersion: 1,
       purpose: "reader",
+      // Usage de CADA tentativa cobrada pelo provider (sucesso ou falha —
+      // ver onAttempt abaixo), preservado através de um retomada em
+      // WAITING_RETRY (nunca reiniciado aqui, já que esta atribuição roda
+      // de novo a cada chamada de executeReadingRun, inclusive retomadas).
+      // tokenUsage/actualCost abaixo são sempre o TOTAL acumulado desta
+      // lista, nunca só a última tentativa (ver bug real: 6 tentativas de
+      // Kimi K2.6, custo real só refletia a última quando havia usage).
+      attemptUsage: run.requestMetadata?.attemptUsage || [],
       // Parâmetros efetivamente enviados ao provider real nesta execução —
       // ausente em demo (não bate em API nenhuma). Fonte única de verdade:
       // js/config.js (nunca hardcoded aqui, ver LLM_READER_*).
@@ -147,11 +155,23 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
           await S.saveRun(run);
           console.warn(`[ReadingRun ${run.id}] aguardando retry após tentativa ${attempt} (${errorType}) — próxima tentativa às ${run.nextRetryAt}.`);
         },
-        onAttempt: async ({ attempt, ok, errorType, retryable, error }) => {
+        onAttempt: async ({ attempt, ok, errorType, retryable, error, result }) => {
           run.attemptCount = attempt;
           run.lastAttemptAt = D.nowISO();
           run.lastErrorType = ok ? null : errorType;
           run.lastErrorMessage = ok ? "" : sanitizeErrorMessage(providerErrorMessage(error));
+          // Usage desta tentativa (sucesso: result.usage; falha: error.usage
+          // — ver ProviderError em llm/provider.js) — nunca descartado só
+          // porque a tentativa falhou depois de o upstream já ter cobrado
+          // tokens de reasoning (ex.: resposta vazia). Acumulado em vez de
+          // sobrescrito para refletir o custo REAL de todas as tentativas.
+          const attemptTokenUsage = ok ? result?.usage : error?.usage;
+          if (attemptTokenUsage) {
+            run.requestMetadata = {
+              ...run.requestMetadata,
+              attemptUsage: [...(run.requestMetadata.attemptUsage || []), { attempt, ...attemptTokenUsage }],
+            };
+          }
           await S.saveRun(run);
           if (!ok) {
             // Log distingue falha definitiva de falha transitória — nunca
@@ -171,14 +191,20 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     }
     // usage vem do provider real (prompt_tokens/completion_tokens/total_tokens,
     // ou nomenclatura equivalente do backend) — nunca disponível em demo.
-    // Persistido para observabilidade/otimização futura (ver requestMetadata).
+    // tokenUsage/actualCost refletem o TOTAL acumulado de TODAS as
+    // tentativas cobradas (attemptUsage, ver onAttempt acima), nunca só a
+    // última tentativa bem-sucedida — um retry falho que já consumiu
+    // tokens de reasoning não pode ser "esquecido" do custo real.
     if (usage) {
-      run.requestMetadata = { ...run.requestMetadata, tokenUsage: usage };
+      const totalUsage = run.requestMetadata.attemptUsage?.length
+        ? sumTokenUsage(run.requestMetadata.attemptUsage)
+        : usage;
+      run.requestMetadata = { ...run.requestMetadata, tokenUsage: totalUsage };
       // Custo REAL (ver js/llm/costEstimate.js) — só calculável quando havia
       // um pricing snapshot congelado (seleção explícita de modelo) e o
       // provider retornou tokenUsage; nunca recalcula a partir do preço
       // "atual" do catálogo.
-      const actualCost = computeActualCost({ pricingSnapshot: run.requestMetadata.modelPricingSnapshot, usage });
+      const actualCost = computeActualCost({ pricingSnapshot: run.requestMetadata.modelPricingSnapshot, usage: totalUsage });
       if (actualCost) run.requestMetadata = { ...run.requestMetadata, actualCost };
     }
     // Mecanismo de contrato de saída efetivamente usado nesta chamada (ver
@@ -238,6 +264,17 @@ export async function executeReadingRun(run, { persona, survey, attributes, reac
     run.lastAttemptAt = D.nowISO();
     if (!run.attemptCount) run.attemptCount = 1;
     run.errorMessage = providerErrorMessage(err) + (run.attemptCount > 1 ? ` (após ${run.attemptCount} tentativa(s))` : "");
+    // Mesmo numa falha definitiva (todas as tentativas exauridas/erro
+    // permanente), tentativas anteriores podem ter sido cobradas pelo
+    // provider (ver onAttempt acima) — nunca deixar "custo real
+    // indisponível" quando já temos usage acumulado de pelo menos uma
+    // tentativa.
+    if (run.requestMetadata?.attemptUsage?.length) {
+      const totalUsage = sumTokenUsage(run.requestMetadata.attemptUsage);
+      run.requestMetadata = { ...run.requestMetadata, tokenUsage: totalUsage };
+      const actualCost = computeActualCost({ pricingSnapshot: run.requestMetadata.modelPricingSnapshot, usage: totalUsage });
+      if (actualCost) run.requestMetadata = { ...run.requestMetadata, actualCost };
+    }
     await S.saveRun(run);
     console.error(`[ReadingRun ${run.id}] falha definitiva (${run.lastErrorType}) após ${run.attemptCount} tentativa(s).`);
     return { ok: false, run, error: err };

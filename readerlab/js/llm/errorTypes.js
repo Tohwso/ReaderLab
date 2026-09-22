@@ -107,3 +107,34 @@ export function classifyAnalystFinalFailure(lastFinishReason, lastErrors = []) {
     errorType: LLM_ERROR_TYPES.UNKNOWN,
   };
 }
+
+// Classifica o corpo `{ error: "empty_response", model, usage, finish_reason,
+// hasReasoningContent }` retornado pelo proxy (ver supabase/functions/
+// llm-proxy/index.ts) quando o upstream não produziu `message.content`.
+// Função PURA (sem I/O) para ser testável isoladamente — provider.js importa
+// db.js (supabase-js) e não roda em Node puro.
+//
+// Uma resposta vazia NUNCA é tratada como falha transitória de servidor:
+// repeti-la automaticamente (como um 5xx genérico faria via
+// classifyHttpStatus) gastaria até LLM_MAX_ATTEMPTS chamadas idênticas
+// (mesmo prompt, mesmo modelo, mesmo orçamento de tokens) sem qualquer
+// chance real de sucesso — este foi exatamente o bug observado com Kimi
+// K2.6 em thinking mode (6 tentativas, ~10min, resposta vazia em todas).
+// `finish_reason === "length"` identifica especificamente um truncamento
+// por max_completion_tokens (código distinto para observabilidade,
+// mesmo padrão de classifyAnalystFinalFailure acima); qualquer outro caso
+// vira um INVALID_RESPONSE genérico — mas SEMPRE não-transitório (nunca
+// mais que a tentativa que já foi feita).
+export function classifyEmptyResponseBody(body) {
+  const truncated = body?.finish_reason === "length";
+  return {
+    code: truncated ? "OUTPUT_TRUNCATED" : "EMPTY_RESPONSE",
+    message: truncated
+      ? "A resposta do modelo foi cortada (finish_reason=length) antes de gerar conteúdo final."
+      : "A API de LLM retornou uma resposta vazia.",
+    errorType: LLM_ERROR_TYPES.INVALID_RESPONSE,
+    usage: body?.usage && typeof body.usage === "object" ? body.usage : null,
+    model: typeof body?.model === "string" ? body.model : null,
+    finishReason: typeof body?.finish_reason === "string" ? body.finish_reason : null,
+  };
+}

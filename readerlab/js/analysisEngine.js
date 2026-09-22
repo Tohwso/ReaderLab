@@ -15,7 +15,7 @@ import { buildResearchAnalystPrompt } from "./llm/researchAnalystPromptBuilder.j
 import { validateResearchAnalysis, RESEARCH_ANALYST_EVIDENCE_SCHEMA_VERSION } from "./llm/researchAnalystValidate.js";
 import { DemoResearchAnalystProvider } from "./llm/demoResearchAnalyst.js";
 import { estimateTokensConservative } from "./llm/tokenEstimate.js";
-import { buildModelPricingSnapshot, estimateCostForTokens, computeActualCost } from "./llm/costEstimate.js";
+import { buildModelPricingSnapshot, estimateCostForTokens, computeActualCost, sumTokenUsage } from "./llm/costEstimate.js";
 import {
   ANALYST_MAX_PROMPT_CHARS,
   ANALYST_TARGET_PROMPT_CHARS,
@@ -145,11 +145,16 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     const provider = isDemo ? new DemoResearchAnalystProvider({ dataset: brief }) : getProvider(liveCfg);
 
     let userPrompt = user;
-    let model, usage;
+    let model;
     let attempt = 0;
     let value = null;
     let lastErrors = [];
     let lastFinishReason = null;
+    // Usage de CADA tentativa cobrada pelo provider (sucesso ou falha) —
+    // nunca sobrescrito por `usage = res.usage` (bug real: a 1ª tentativa
+    // falhar na validação e a 2ª suceder perdia o custo da 1ª chamada, que
+    // já tinha sido cobrada). Ver mesma lógica em engine.js/ReadingRun.
+    const attemptUsage = [];
 
     while (attempt < MAX_ATTEMPTS && !value) {
       attempt++;
@@ -159,14 +164,31 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
       // tentativas (truncamento nunca é "corrigido" com mais tokens em loop).
       // purpose: "analyst" NUNCA muda para "reader" no retry — mantém o
       // Research Analyst sempre roteado para LLM_ANALYST_MODEL no servidor.
-      const res = await provider.complete({
-        systemPrompt: system,
-        userPrompt,
-        purpose: "analyst",
-        ...(isDemo ? {} : { modelId, reasoningEffort: ANALYST_REASONING_EFFORT, maxCompletionTokens: ANALYST_MAX_COMPLETION_TOKENS }),
-      });
+      let res;
+      try {
+        res = await provider.complete({
+          systemPrompt: system,
+          userPrompt,
+          purpose: "analyst",
+          ...(isDemo ? {} : { modelId, reasoningEffort: ANALYST_REASONING_EFFORT, maxCompletionTokens: ANALYST_MAX_COMPLETION_TOKENS }),
+        });
+      } catch (err) {
+        // Uma falha do provider (ex.: empty_response) pode já ter sido
+        // cobrada pelo upstream (ver ProviderError.usage, llm/provider.js) —
+        // preserva esse custo em requestMetadata ANTES de propagar o erro,
+        // já que este loop nunca tenta de novo uma falha de provider (só
+        // JSON inválido/evidence reprovada, ver comentário no topo do arquivo).
+        if (err?.usage) {
+          attemptUsage.push({ attempt, ...err.usage });
+          const totalUsage = sumTokenUsage(attemptUsage);
+          analysisRun.requestMetadata = { ...analysisRun.requestMetadata, tokenUsage: totalUsage, attemptUsage };
+          const actualCost = computeActualCost({ pricingSnapshot: analysisRun.requestMetadata.modelPricingSnapshot, usage: totalUsage });
+          if (actualCost) analysisRun.requestMetadata = { ...analysisRun.requestMetadata, actualCost };
+        }
+        throw err;
+      }
       model = res.model;
-      usage = res.usage;
+      if (res.usage) attemptUsage.push({ attempt, ...res.usage });
       lastFinishReason = res.finishReason ?? null;
 
       let parsed;
@@ -191,9 +213,13 @@ export async function runPopulationAnalysis(popRun, { mode, liveCfg, segments = 
     }
 
     if (!isDemo && model) analysisRun.model = model;
-    if (usage) {
-      analysisRun.requestMetadata = { ...analysisRun.requestMetadata, tokenUsage: usage };
-      const actualCost = computeActualCost({ pricingSnapshot: analysisRun.requestMetadata.modelPricingSnapshot, usage });
+    // tokenUsage/actualCost refletem o TOTAL acumulado de TODAS as
+    // tentativas cobradas (attemptUsage), nunca só a última — ver comentário
+    // acima sobre a mesma correção em engine.js/ReadingRun.
+    if (attemptUsage.length) {
+      const totalUsage = sumTokenUsage(attemptUsage);
+      analysisRun.requestMetadata = { ...analysisRun.requestMetadata, tokenUsage: totalUsage, attemptUsage };
+      const actualCost = computeActualCost({ pricingSnapshot: analysisRun.requestMetadata.modelPricingSnapshot, usage: totalUsage });
       if (actualCost) analysisRun.requestMetadata = { ...analysisRun.requestMetadata, actualCost };
     }
     analysisRun.requestMetadata = { ...analysisRun.requestMetadata, attempts: attempt, retried: attempt > 1, finishReason: lastFinishReason };

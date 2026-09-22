@@ -60,9 +60,11 @@ export class RetryCancelledError extends Error {
 // `classify(err)` deve retornar `{ errorType, retryAfterMs }` a partir do
 // erro lançado (ex.: ProviderError já carrega isso, ver llm/provider.js) —
 // a decisão de retry nunca é tomada fora da taxonomia de errorTypes.js.
-// `onAttempt({ attempt, ok, errorType, retryable, error })` é chamado a
-// cada tentativa (sucesso ou falha) para permitir persistir metadata/log
-// sem que esta função saiba nada sobre ReadingRun.
+// `onAttempt({ attempt, ok, errorType, retryable, error, result })` é
+// chamado a cada tentativa (sucesso ou falha) para permitir persistir
+// metadata/log sem que esta função saiba nada sobre ReadingRun. `result`
+// só vem preenchido quando `ok: true` (o retorno de `attempt(n)`);
+// `errorType`/`retryable`/`error` só quando `ok: false`.
 // `onWaitingRetry({ attempt, errorType, nextRetryAt })` é chamado ANTES de
 // começar a esperar — é o gancho para persistir status=WAITING_RETRY +
 // nextRetryAt, o que torna o retry sobrevivente a um refresh da página.
@@ -106,7 +108,12 @@ export async function runWithRetry(attempt, {
     await beforeAttempt?.(n);
     try {
       const result = await attempt(n);
-      await onAttempt?.({ attempt: n, ok: true });
+      // `result` incluído (campo adicional, nunca remove os existentes)
+      // para permitir ao chamador (ver engine.js) contabilizar o usage da
+      // tentativa que teve sucesso junto com o de tentativas anteriores que
+      // falharam mas ainda assim consumiram tokens — ver soma de
+      // attemptUsage em engine.js/analysisEngine.js.
+      await onAttempt?.({ attempt: n, ok: true, result });
       return result;
     } catch (err) {
       lastError = err;

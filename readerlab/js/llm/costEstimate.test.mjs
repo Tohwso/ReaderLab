@@ -5,6 +5,7 @@ import {
   estimateMaximumOutputCost,
   computeActualCost,
   getHistoricalUsageStats,
+  sumTokenUsage,
 } from "./costEstimate.js";
 
 let passed = 0;
@@ -124,6 +125,51 @@ test("getHistoricalUsageStats retorna null sem nenhuma amostra (execuções anti
   ];
   assert.equal(getHistoricalUsageStats({ purpose: "reader", modelId: "kimi-k3", runs }), null);
   assert.equal(getHistoricalUsageStats({ purpose: "reader", modelId: "kimi-k3", runs: [] }), null);
+});
+
+// ---- Regressão: "Custo real indisponível" + usage perdido em retries
+// (bug real: ReadingRun com Kimi K2.6 fez 6 tentativas, cada uma
+// consumindo tokens de reasoning, mas só o usage da última tentativa
+// (quando existia) era persistido — ver engine.js/analysisEngine.js) ----
+test("J) sumTokenUsage acumula usage de múltiplas tentativas (nenhuma é descartada)", () => {
+  const attemptUsage = [
+    { attempt: 1, prompt_tokens: 1200, completion_tokens: 4000, total_tokens: 5200 },
+    { attempt: 2, prompt_tokens: 1200, completion_tokens: 3900, total_tokens: 5100 },
+    { attempt: 3, prompt_tokens: 1200, completion_tokens: 3500, total_tokens: 4700 },
+  ];
+  const total = sumTokenUsage(attemptUsage);
+  assert.equal(total.completion_tokens, 4000 + 3900 + 3500);
+  assert.equal(total.total_tokens, 5200 + 5100 + 4700);
+});
+
+test("K) actualCost calculado a partir do usage ACUMULADO reflete todas as tentativas cobradas, não só a última bem-sucedida", () => {
+  const snapshot = buildModelPricingSnapshot(KIMI_K2_6_PRICING);
+  const attemptUsage = [
+    { attempt: 1, prompt_tokens: 1200, completion_tokens: 4000, total_tokens: 5200 },
+    { attempt: 2, prompt_tokens: 1200, completion_tokens: 3900, total_tokens: 5100 },
+    { attempt: 3, prompt_tokens: 1200, completion_tokens: 3500, total_tokens: 4700 },
+  ];
+  const totalUsage = sumTokenUsage(attemptUsage);
+  const actualCost = computeActualCost({ pricingSnapshot: snapshot, usage: totalUsage });
+  const costOnlyLastAttempt = computeActualCost({ pricingSnapshot: snapshot, usage: attemptUsage[2] });
+  assert.equal(actualCost.completionTokens, 11400);
+  assert.ok(actualCost.totalCost > costOnlyLastAttempt.totalCost, "custo acumulado deve ser maior que o custo de só a última tentativa");
+});
+
+test("L) AnalysisRun com 2 tentativas (retry de evidence) soma o usage de ambas, nunca sobrescreve", () => {
+  const attemptUsage = [
+    { attempt: 1, prompt_tokens: 5000, completion_tokens: 2000, total_tokens: 7000 },
+    { attempt: 2, prompt_tokens: 5000, completion_tokens: 2200, total_tokens: 7200 },
+  ];
+  const total = sumTokenUsage(attemptUsage);
+  assert.equal(total.prompt_tokens, 10000);
+  assert.equal(total.completion_tokens, 4200);
+  assert.equal(total.total_tokens, 14200);
+});
+
+test("sumTokenUsage com lista vazia/ausente retorna zeros (nunca null/undefined/NaN)", () => {
+  assert.deepEqual(sumTokenUsage([]), { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  assert.deepEqual(sumTokenUsage(undefined), { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
 });
 
 console.log(`\n${passed} teste(s) passaram.`);

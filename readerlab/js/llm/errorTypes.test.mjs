@@ -6,7 +6,7 @@
 // CORTADA (finish_reason="length") de uma resposta genuinamente inválida
 // (JSON malformado / evidence fabricada com finish_reason="stop" ou ausente).
 import assert from "node:assert/strict";
-import { classifyAnalystFinalFailure, LLM_ERROR_TYPES } from "./errorTypes.js";
+import { classifyAnalystFinalFailure, classifyEmptyResponseBody, isRetryableErrorType, LLM_ERROR_TYPES } from "./errorTypes.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -45,6 +45,42 @@ test("mensagem de INVALID_EVIDENCE inclui até 5 erros da última tentativa", ()
   const r = classifyAnalystFinalFailure("stop", errors);
   assert.ok(r.message.includes("e1") && r.message.includes("e5"));
   assert.ok(!r.message.includes("e6"), "não deveria incluir mais de 5 erros na mensagem");
+});
+
+// ---- Regressão: ReadingRun com Kimi K2.6 fez 6 tentativas e falhou com
+// "resposta vazia" sem NENHUM usage/finish_reason preservado (ver
+// supabase/functions/llm-proxy/index.ts + js/llm/provider.js) ----
+test("G) classifyEmptyResponseBody preserva o usage do corpo do erro", () => {
+  const usage = { prompt_tokens: 1200, completion_tokens: 3000, total_tokens: 4200 };
+  const r = classifyEmptyResponseBody({ error: "empty_response", model: "kimi-k2.6", usage, finish_reason: "stop" });
+  assert.deepEqual(r.usage, usage);
+  assert.equal(r.model, "kimi-k2.6");
+});
+
+test("H) classifyEmptyResponseBody preserva o finish_reason do corpo do erro", () => {
+  const r = classifyEmptyResponseBody({ error: "empty_response", finish_reason: "length" });
+  assert.equal(r.finishReason, "length");
+});
+
+test("I) empty_response com finish_reason=length -> OUTPUT_TRUNCATED, permanente (nunca dispara 6 retries)", () => {
+  const r = classifyEmptyResponseBody({ error: "empty_response", finish_reason: "length" });
+  assert.equal(r.code, "OUTPUT_TRUNCATED");
+  assert.equal(r.errorType, LLM_ERROR_TYPES.INVALID_RESPONSE);
+  assert.equal(isRetryableErrorType(r.errorType), false);
+});
+
+test("empty_response sem finish_reason conhecido -> EMPTY_RESPONSE, também permanente (nunca 6 retries)", () => {
+  const r = classifyEmptyResponseBody({ error: "empty_response" });
+  assert.equal(r.code, "EMPTY_RESPONSE");
+  assert.equal(r.errorType, LLM_ERROR_TYPES.INVALID_RESPONSE);
+  assert.equal(isRetryableErrorType(r.errorType), false);
+});
+
+test("classifyEmptyResponseBody sem usage/model/finish_reason -> campos null (nunca undefined/erro)", () => {
+  const r = classifyEmptyResponseBody({ error: "empty_response" });
+  assert.equal(r.usage, null);
+  assert.equal(r.model, null);
+  assert.equal(r.finishReason, null);
 });
 
 console.log(`\n${passed} teste(s) passaram.`);

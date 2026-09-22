@@ -16,7 +16,7 @@
 
 import { getAccessToken, getAnonKey } from "../db.js";
 import { LLM_PROXY_ENDPOINT } from "../config.js";
-import { LLM_ERROR_TYPES, classifyHttpErrorResponse } from "./errorTypes.js";
+import { LLM_ERROR_TYPES, classifyHttpErrorResponse, classifyEmptyResponseBody } from "./errorTypes.js";
 export { LLM_ERROR_TYPES } from "./errorTypes.js";
 
 // provider/model/temperature aqui são só rótulos de exibição — o servidor
@@ -45,13 +45,22 @@ export function getLLMConfig() {
 }
 
 export class ProviderError extends Error {
-  constructor(code, message, { errorType = LLM_ERROR_TYPES.UNKNOWN, retryAfterMs = null, detail } = {}) {
+  constructor(code, message, { errorType = LLM_ERROR_TYPES.UNKNOWN, retryAfterMs = null, detail, usage = null, model = null, finishReason = null } = {}) {
     super(message);
     this.name = "ProviderError";
-    this.code = code; // rótulo específico legado (NOT_CONFIGURED | NETWORK | TIMEOUT | AUTH | HTTP | INVALID_JSON | INVALID_SCHEMA | EMPTY)
+    this.code = code; // rótulo específico legado (NOT_CONFIGURED | NETWORK | TIMEOUT | AUTH | HTTP | INVALID_JSON | INVALID_SCHEMA | EMPTY | EMPTY_RESPONSE | OUTPUT_TRUNCATED)
     this.errorType = errorType; // taxonomia interna (ver llm/errorTypes.js) — usada para decidir retry
     this.retryAfterMs = retryAfterMs; // Retry-After (ms) informado pela API, quando disponível
     this.detail = detail;
+    // Metadata SEGURA (nunca o texto de reasoning/conteúdo raw) preservada
+    // quando o backend retorna um erro que já sabia o usage/model/
+    // finish_reason da chamada que falhou (ex.: empty_response) — permite
+    // ao chamador (engine.js/analysisEngine.js) contabilizar o custo de
+    // tentativas que falharam mas ainda assim consumiram tokens (ver
+    // llm-proxy/index.ts e a soma de attemptUsage em engine.js).
+    this.usage = usage;
+    this.model = model;
+    this.finishReason = finishReason;
   }
 }
 
@@ -135,6 +144,23 @@ export class KimiProvider {
       let body = null;
       try { body = await res.json(); } catch (_) { /* corpo não-JSON — segue sem detalhe extra */ }
 
+      // Resposta vazia do upstream (ver supabase/functions/llm-proxy) — NUNCA
+      // tratada como falha transitória de servidor: um 502 genérico cairia
+      // em SERVER_ERROR (retryable) via classifyHttpErrorResponse, repetindo
+      // a MESMA chamada (mesmo prompt/modelo/orçamento de tokens) até
+      // LLM_MAX_ATTEMPTS vezes sem qualquer chance de sucesso — este foi
+      // exatamente o bug observado com Kimi K2.6 em thinking mode. Precisa
+      // vir ANTES da classificação genérica abaixo para não ser sobrescrita.
+      if (body?.error === "empty_response") {
+        const classified = classifyEmptyResponseBody(body);
+        throw new ProviderError(classified.code, classified.message, {
+          errorType: classified.errorType,
+          usage: classified.usage,
+          model: classified.model,
+          finishReason: classified.finishReason,
+        });
+      }
+
       const errorType = res.status === 401 || res.status === 403
         ? LLM_ERROR_TYPES.AUTH_ERROR
         : classifyHttpErrorResponse(res.status, body);
@@ -151,7 +177,7 @@ export class KimiProvider {
         : typeof body?.message === "string" ? body.message
         : `O backend retornou erro HTTP ${res.status}.`;
 
-      throw new ProviderError("HTTP", message, { errorType, retryAfterMs });
+      throw new ProviderError("HTTP", message, { errorType, retryAfterMs, usage: body?.usage || null, model: body?.model || null, finishReason: body?.finish_reason || null });
     }
 
     let data;
@@ -163,7 +189,21 @@ export class KimiProvider {
 
     const content = typeof data.content === "string" ? data.content : null;
     if (!content || !content.trim()) {
-      throw new ProviderError("EMPTY", "O modelo retornou uma resposta vazia.", { errorType: LLM_ERROR_TYPES.SERVER_ERROR });
+      // Defensivo: o proxy já intercepta esse caso com 502 "empty_response"
+      // (tratado acima), então este branch só dispara se o backend algum dia
+      // devolver 200 com content vazio mesmo assim — mesma classificação
+      // não-transitória, nunca SERVER_ERROR (que geraria retries inúteis).
+      const classified = classifyEmptyResponseBody({
+        finish_reason: typeof data.finish_reason === "string" ? data.finish_reason : undefined,
+        usage: data.usage,
+        model: data.model,
+      });
+      throw new ProviderError(classified.code, classified.message, {
+        errorType: classified.errorType,
+        usage: classified.usage,
+        model: classified.model,
+        finishReason: classified.finishReason,
+      });
     }
     // finish_reason ("stop" | "length" | ...) repassado pelo proxy quando o
     // upstream o fornece — usado por analysisEngine.js para distinguir uma

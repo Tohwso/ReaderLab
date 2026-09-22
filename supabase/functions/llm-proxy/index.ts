@@ -367,11 +367,11 @@ Deno.serve(async (req: Request) => {
   }
 
   const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) {
-    return json({ error: "empty_response", message: "A API de LLM retornou uma resposta vazia." }, 502, cors);
-  }
-
-  // 8) Resposta enxuta — sem o objeto raw inteiro da API de LLM.
+  // 8) Resposta enxuta — sem o objeto raw inteiro da API de LLM. Extraídos
+  // ANTES de validar `content` (mesmo quando content vier vazio): uma
+  // chamada que gastou tokens de reasoning e terminou sem `content` ainda
+  // foi provavelmente cobrada pelo provedor — nunca descartar usage/
+  // finish_reason só porque o resultado final ficou vazio (ver "empty_response" abaixo).
   const usage = data?.usage && typeof data.usage === "object"
     ? {
         prompt_tokens: data.usage.prompt_tokens,
@@ -384,6 +384,32 @@ Deno.serve(async (req: Request) => {
   // uma resposta cortada por max_completion_tokens de um JSON só malformado
   // (ver analysisEngine.js).
   const finishReason = typeof data?.choices?.[0]?.finish_reason === "string" ? data.choices[0].finish_reason : undefined;
+  // Diagnóstico seguro (nunca o texto do reasoning em si — pode conter
+  // raciocínio extenso/sensível) para investigar "content vazio" quando o
+  // modelo suporta thinking mode (ex.: Kimi K2.6): só um booleano.
+  const reasoningContent = data?.choices?.[0]?.message?.reasoning_content;
+  const hasReasoningContent = typeof reasoningContent === "string" && reasoningContent.trim().length > 0;
+
+  if (typeof content !== "string" || !content.trim()) {
+    console.error(
+      "llm-proxy empty_response",
+      model,
+      finishReason || "(sem finish_reason)",
+      "hasReasoningContent=" + hasReasoningContent
+    );
+    return json(
+      {
+        error: "empty_response",
+        message: "A API de LLM retornou uma resposta vazia.",
+        model,
+        ...(usage ? { usage } : {}),
+        ...(finishReason ? { finish_reason: finishReason } : {}),
+        hasReasoningContent,
+      },
+      502,
+      cors
+    );
+  }
 
   return json({ content, model, structuredOutputMode, ...(usage ? { usage } : {}), ...(finishReason ? { finish_reason: finishReason } : {}) }, 200, cors);
 });

@@ -49,18 +49,25 @@ export function resolveModel({ purpose, readerModelEnv, analystModelEnv, legacyM
 // reasoningEffort e customTemperature são capabilities INDEPENDENTES —
 // nunca derivar uma da outra (ver capabilities.customTemperature explícito
 // no catálogo; um modelo pode não suportar nenhuma, ambas, ou só uma).
+// thinkingToggle é OUTRA capability independente: modelos que a suportam
+// (ex.: kimi-k2.6) entram em "thinking mode" por DEFAULT do provider —
+// como o ReaderLab quer K2.6 como modelo rápido/econômico/non-thinking,
+// sempre desligamos explicitamente (nunca deixado para o default do
+// provider, que consumiria o orçamento de max_completion_tokens com
+// reasoning antes de gerar conteúdo final — bug real observado).
 export function getModelCapabilities(model) {
   const catalogEntry = findModel(model);
   if (catalogEntry) {
     return {
       supportsReasoningEffort: catalogEntry.capabilities.reasoningEffort === true,
       supportsCustomTemperature: catalogEntry.capabilities.customTemperature === true,
+      supportsThinkingToggle: catalogEntry.capabilities.thinkingToggle === true,
     };
   }
   if (model === "kimi-k3") {
-    return { supportsReasoningEffort: true, supportsCustomTemperature: false };
+    return { supportsReasoningEffort: true, supportsCustomTemperature: false, supportsThinkingToggle: false };
   }
-  return { supportsReasoningEffort: false, supportsCustomTemperature: true };
+  return { supportsReasoningEffort: false, supportsCustomTemperature: true, supportsThinkingToggle: false };
 }
 
 // Valida um `modelId` explicitamente escolhido pelo cliente (seção 6/33 da
@@ -96,17 +103,22 @@ export function validateRequestedModel({ modelId, purpose }) {
 
 // Separa parâmetros comuns (model/messages/max_completion_tokens/
 // response_format) dos específicos por modelo (reasoning_effort/
-// temperature) — nunca envia um parâmetro exclusivo de K3 para outro modelo.
+// temperature/thinking) — nunca envia um parâmetro exclusivo de um modelo
+// para outro.
 /**
  * @param {{ model: string, messages: Array<{role: string, content: string}>, reasoningEffort?: string, maxCompletionTokens?: number|null, jsonMode?: boolean }} params
- * @returns {{ model: string, messages: Array<{role: string, content: string}>, temperature?: number, reasoning_effort?: string, max_completion_tokens?: number, response_format?: { type: string } }}
+ * @returns {{ model: string, messages: Array<{role: string, content: string}>, temperature?: number, reasoning_effort?: string, thinking?: { type: string }, max_completion_tokens?: number, response_format?: { type: string } }}
  */
 export function buildUpstreamPayload({ model, messages, reasoningEffort, maxCompletionTokens, jsonMode }) {
   const capabilities = getModelCapabilities(model);
-  /** @type {{ model: string, messages: Array<{role: string, content: string}>, temperature?: number, reasoning_effort?: string, max_completion_tokens?: number, response_format?: { type: string } }} */
+  /** @type {{ model: string, messages: Array<{role: string, content: string}>, temperature?: number, reasoning_effort?: string, thinking?: { type: string }, max_completion_tokens?: number, response_format?: { type: string } }} */
   const payload = { model, messages };
   if (capabilities.supportsCustomTemperature) payload.temperature = 0.7;
   if (capabilities.supportsReasoningEffort) payload.reasoning_effort = reasoningEffort;
+  // Sempre DESLIGADO (nunca um toggle exposto ao usuário/chamador) — o
+  // ReaderLab nunca precisou do reasoning de K2.6 até hoje; ligar isso um
+  // dia exige decisão explícita, nunca o default silencioso do provider.
+  if (capabilities.supportsThinkingToggle) payload.thinking = { type: "disabled" };
   if (maxCompletionTokens) payload.max_completion_tokens = maxCompletionTokens;
   if (jsonMode) payload.response_format = { type: "json_object" };
   return payload;

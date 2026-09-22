@@ -60,25 +60,27 @@ test("sem nenhum env configurado -> cai no defaultModel para ambos os purposes",
   assert.equal(resolveModel({ purpose: "analyst", readerModelEnv: undefined, analystModelEnv: undefined, legacyModelEnv: undefined, defaultModel: "gpt-4o-mini" }), "gpt-4o-mini");
 });
 
-test("K) kimi-k3 -> reasoning_effort presente, SEM temperature customizada", () => {
+test("K) kimi-k3 -> reasoning_effort presente, SEM temperature customizada, SEM thinking", () => {
   const payload = buildUpstreamPayload({ model: "kimi-k3", messages: [], reasoningEffort: "low", maxCompletionTokens: 8000, jsonMode: true });
   assert.equal(payload.reasoning_effort, "low");
   assert.equal("temperature" in payload, false);
+  assert.equal("thinking" in payload, false);
   assert.equal(payload.max_completion_tokens, 8000);
   assert.deepEqual(payload.response_format, { type: "json_object" });
 });
 
-test("L) kimi-k2.6 -> NÃO recebe reasoning_effort (parâmetro exclusivo de K3) nem temperature (K2.6 não suporta valor customizado — só 1 é aceito pelo provider)", () => {
+test("L) kimi-k2.6 -> NÃO recebe reasoning_effort (parâmetro exclusivo de K3) nem temperature (K2.6 não suporta valor customizado — só 1 é aceito pelo provider), mas recebe thinking:disabled", () => {
   const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], reasoningEffort: "low", maxCompletionTokens: 8000, jsonMode: true });
   assert.equal("reasoning_effort" in payload, false);
   assert.equal("temperature" in payload, false);
+  assert.deepEqual(payload.thinking, { type: "disabled" });
   assert.equal(payload.max_completion_tokens, 8000);
 });
 
-test("getModelCapabilities: reasoning_effort e temperature customizada são capabilities independentes (nenhum dos dois modelos do catálogo suporta temperature customizada)", () => {
-  assert.deepEqual(getModelCapabilities("kimi-k3"), { supportsReasoningEffort: true, supportsCustomTemperature: false });
-  assert.deepEqual(getModelCapabilities("kimi-k2.6"), { supportsReasoningEffort: false, supportsCustomTemperature: false });
-  assert.deepEqual(getModelCapabilities("gpt-4o-mini"), { supportsReasoningEffort: false, supportsCustomTemperature: true });
+test("getModelCapabilities: reasoning_effort, temperature customizada e thinking toggle são capabilities independentes (nenhum dos dois modelos do catálogo suporta temperature customizada; só K2.6 suporta desligar thinking)", () => {
+  assert.deepEqual(getModelCapabilities("kimi-k3"), { supportsReasoningEffort: true, supportsCustomTemperature: false, supportsThinkingToggle: false });
+  assert.deepEqual(getModelCapabilities("kimi-k2.6"), { supportsReasoningEffort: false, supportsCustomTemperature: false, supportsThinkingToggle: true });
+  assert.deepEqual(getModelCapabilities("gpt-4o-mini"), { supportsReasoningEffort: false, supportsCustomTemperature: true, supportsThinkingToggle: false });
 });
 
 // ---- Regressão: "invalid temperature: only 1 is allowed for this model" ----
@@ -119,6 +121,30 @@ test("G) capability de temperature customizada não é inferida a partir de reas
   const caps = getModelCapabilities("kimi-k2.6");
   assert.equal(caps.supportsReasoningEffort, false);
   assert.equal(caps.supportsCustomTemperature, false);
+});
+
+// ---- Regressão: "empty_response após 6 tentativas" (K2.6 entrando em
+// thinking mode por default do provider, consumindo o orçamento de
+// max_completion_tokens com reasoning antes de gerar conteúdo final) ----
+test("A) reader + kimi-k2.6 (max_completion_tokens=3000) -> thinking.type = disabled", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], maxCompletionTokens: 3000, jsonMode: true });
+  assert.deepEqual(payload.thinking, { type: "disabled" });
+});
+
+test("B) analyst + kimi-k2.6 (max_completion_tokens=8000) -> thinking.type = disabled", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k2.6", messages: [], maxCompletionTokens: 8000, jsonMode: true });
+  assert.deepEqual(payload.thinking, { type: "disabled" });
+});
+
+test("F) kimi-k3 -> payload NÃO contém a propriedade thinking (não suporta o toggle, sempre thinking por padrão do provider)", () => {
+  const payload = buildUpstreamPayload({ model: "kimi-k3", messages: [], reasoningEffort: "low", maxCompletionTokens: 8000, jsonMode: true });
+  assert.equal("thinking" in payload, false);
+});
+
+test("thinkingToggle não é inferido a partir de reasoningEffort (kimi-k3 tem reasoningEffort=true e MESMO ASSIM não suporta o toggle de thinking)", () => {
+  const caps = getModelCapabilities("kimi-k3");
+  assert.equal(caps.supportsReasoningEffort, true);
+  assert.equal(caps.supportsThinkingToggle, false);
 });
 
 test("maxCompletionTokens ausente/0 nunca aparece no payload", () => {

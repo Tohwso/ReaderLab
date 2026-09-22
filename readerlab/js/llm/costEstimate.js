@@ -55,6 +55,27 @@ export function estimateMaximumOutputCost({ pricing, estimatedInputTokens, maxCo
   return estimateCostForTokens({ pricing, estimatedInputTokens, estimatedOutputTokens: maxCompletionTokens });
 }
 
+// Soma o usage de MÚLTIPLAS tentativas de uma mesma execução (ReadingRun
+// ou AnalysisRun) — cada tentativa que chegou ao upstream e retornou usage
+// foi cobrada pelo provedor, mesmo quando a tentativa falhou depois (ex.:
+// resposta vazia após gastar tokens de reasoning, ver llm/provider.js e
+// engine.js/analysisEngine.js). `usageList` é uma lista de objetos
+// `{ prompt_tokens, completion_tokens, total_tokens }` (uma por tentativa
+// cobrada); entradas ausentes/inválidas contam como 0 em cada campo — o
+// custo real de uma execução deve refletir TODAS as tentativas cobradas,
+// nunca só a última (bem-sucedida ou não).
+export function sumTokenUsage(usageList) {
+  const list = Array.isArray(usageList) ? usageList : [];
+  return list.reduce(
+    (acc, u) => ({
+      prompt_tokens: acc.prompt_tokens + (typeof u?.prompt_tokens === "number" ? u.prompt_tokens : 0),
+      completion_tokens: acc.completion_tokens + (typeof u?.completion_tokens === "number" ? u.completion_tokens : 0),
+      total_tokens: acc.total_tokens + (typeof u?.total_tokens === "number" ? u.total_tokens : 0),
+    }),
+    { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+  );
+}
+
 // Custo REAL após a execução — exige um snapshot de pricing já congelado
 // (o mesmo usado na estimativa, nunca o preço "atual" do catálogo) e o
 // `usage` real retornado pelo provider. Sem `usage` (provider não retornou

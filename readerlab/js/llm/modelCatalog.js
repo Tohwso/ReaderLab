@@ -29,6 +29,7 @@ const FALLBACK_CATALOG = [
     },
     capabilities: {
       jsonMode: true,
+      thinkingToggle: true,
       reasoningEffort: false,
       maxCompletionTokens: true,
       customTemperature: false,
@@ -52,6 +53,8 @@ const FALLBACK_CATALOG = [
     },
     capabilities: {
       jsonMode: true,
+      thinkingToggle: false,
+      alwaysThinking: true,
       reasoningEffort: true,
       maxCompletionTokens: true,
       customTemperature: false,
