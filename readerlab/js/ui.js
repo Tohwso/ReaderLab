@@ -11,6 +11,7 @@ import { executeReadingRun, executePopulationRun, resumePopulationRun, cancelPop
 import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
 import { SEGMENT_RULE_OPS, filterPersonasBySegment, computeQuestionStats, computeReactionAggregates, collectQuestionAnswers, computeBooleanStats, computeChoiceStats } from "./analytics/populationMetrics.js";
 import { runPopulationAnalysis } from "./analysisEngine.js";
+import * as PF from "./personaFilter.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -994,31 +995,263 @@ function populationModal(existing = null) {
   });
 }
 
+// Seletor de membros orientado a perfil (busca, tags, filtros de atributo,
+// presets) — ver personaFilter.js para toda a lógica de filtro/aderência.
+// PRINCÍPIO: "filtrar" só decide o que fica visível; "selecionar" (o Set
+// `selectedIds`, um rascunho local) é quem decide quem pertence à
+// Population — nunca mutamos `pop` até o usuário clicar em "Salvar membros".
 function membersModal(pop) {
-  const active = S.state.personas.filter((p) => p.status !== "arquivada");
-  openModal({
-    title: `Membros — ${pop.name}`,
-    wide: true,
-    submitLabel: "Salvar membros",
-    body: `
-      <p class="muted small" style="margin-bottom:10px">Selecione as personas que compõem esta população (${active.length} disponíveis).</p>
-      <div style="max-height:46vh;overflow-y:auto">
-        ${active.map((p) => `
-          <label class="checkbox-row">
-            <input type="checkbox" data-member="${p.id}" ${pop.personaIds.includes(p.id) ? "checked" : ""}>
+  const selectedIds = new Set(pop.personaIds);
+  let filters = PF.blankMemberFilters();
+  const activePersonas = () => S.state.personas.filter((p) => p.status !== "arquivada");
+  const activeAttributes = () => S.state.attributes.filter((a) => a.status === "ativa");
+  const currentResults = () => PF.filterPersonas({ personas: activePersonas(), attributes: activeAttributes(), filters, selectedIds });
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal xwide" role="dialog" aria-modal="true">
+      <div class="modal-head"><h3>Membros — ${esc(pop.name)}</h3><button type="button" class="btn btn-ghost btn-sm" data-close>✕</button></div>
+      <form class="modal-form" novalidate>
+        <div class="modal-body">
+          <div class="population-member-filters" id="pmf-filters"></div>
+          <div class="filter-summary" id="pmf-summary"></div>
+          <div class="population-member-list" id="pmf-list"></div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn" data-close>Cancelar</button>
+          <button type="submit" class="btn btn-primary">Salvar membros</button>
+        </div>
+      </form>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  $$("[data-close]", overlay).forEach((b) => b.addEventListener("click", close));
+
+  const filtersEl = $("#pmf-filters", overlay);
+  const summaryEl = $("#pmf-summary", overlay);
+  const listEl = $("#pmf-list", overlay);
+
+  const attributeOptionsHTML = (attrs, selectedId) => D.ATTRIBUTE_GROUPS.map((g) => {
+    const list = attrs.filter((a) => a.group === g);
+    if (!list.length) return "";
+    return `<optgroup label="${esc(g)}">${list.map((a) => `<option value="${a.id}" ${a.id === selectedId ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</optgroup>`;
+  }).join("");
+
+  const renderAttrFilterRow = (attrs, f, idx) => {
+    const attribute = attrs.find((a) => a.id === f.attributeId);
+    return `
+      <div class="attribute-filter-row" data-af-idx="${idx}">
+        <select data-af-field="attributeId" data-af-idx="${idx}">${attributeOptionsHTML(attrs, f.attributeId)}</select>
+        <select data-af-field="operator" data-af-idx="${idx}">
+          <option value="gte" ${f.operator === "gte" ? "selected" : ""}>≥ (maior ou igual)</option>
+          <option value="lte" ${f.operator === "lte" ? "selected" : ""}>≤ (menor ou igual)</option>
+          <option value="between" ${f.operator === "between" ? "selected" : ""}>entre</option>
+        </select>
+        ${f.operator === "between"
+          ? `<input type="number" min="${attribute?.min ?? ""}" max="${attribute?.max ?? ""}" data-af-field="min" data-af-idx="${idx}" value="${f.min ?? attribute?.min ?? 0}" placeholder="mín">
+             <input type="number" min="${attribute?.min ?? ""}" max="${attribute?.max ?? ""}" data-af-field="max" data-af-idx="${idx}" value="${f.max ?? attribute?.max ?? 100}" placeholder="máx">`
+          : `<input type="number" min="${attribute?.min ?? ""}" max="${attribute?.max ?? ""}" data-af-field="value" data-af-idx="${idx}" value="${f.value ?? attribute?.defaultValue ?? 50}" placeholder="valor">`}
+        <button type="button" class="btn btn-sm btn-ghost btn-danger" data-af-remove="${idx}">Remover</button>
+      </div>`;
+  };
+
+  function renderFiltersPanel() {
+    if (filters.attributeFilters.length === 0 && filters.sortBy === "adherence") filters.sortBy = "code";
+    const attrs = activeAttributes();
+    const presets = PF.resolveMemberFilterPresets(attrs);
+    filtersEl.innerHTML = `
+      <div class="toolbar" style="margin-bottom:0">
+        <input type="text" class="search-input" id="pmf-search" placeholder="Buscar por código, nome, descrição ou tag…" value="${esc(filters.search)}">
+        <select id="pmf-membership">
+          <option value="all" ${filters.membership === "all" ? "selected" : ""}>Membros: todos</option>
+          <option value="selected" ${filters.membership === "selected" ? "selected" : ""}>Já selecionados</option>
+          <option value="unselected" ${filters.membership === "unselected" ? "selected" : ""}>Não selecionados</option>
+        </select>
+        <select id="pmf-sort">
+          <option value="code" ${filters.sortBy === "code" ? "selected" : ""}>Ordenar: código</option>
+          <option value="name" ${filters.sortBy === "name" ? "selected" : ""}>Ordenar: nome</option>
+          <option value="selected" ${filters.sortBy === "selected" ? "selected" : ""}>Ordenar: selecionados primeiro</option>
+          ${filters.attributeFilters.length ? `<option value="adherence" ${filters.sortBy === "adherence" ? "selected" : ""}>Ordenar: maior aderência</option>` : ""}
+        </select>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-sm btn-ghost" id="pmf-clear">Limpar filtros</button>
+      </div>
+      ${S.state.tags.length ? `
+      <div class="pmf-tags">
+        <span class="hint">Tags:</span>
+        ${S.state.tags.map((t) => `<button type="button" class="btn btn-sm ${filters.tags.includes(t.name) ? "btn-primary" : "btn-ghost"}" data-tag="${esc(t.name)}">${esc(t.name)}</button>`).join("")}
+        ${filters.tags.length > 1 ? `
+        <label class="radio-row" style="padding-left:6px"><input type="radio" name="pmf-tagmode" value="any" ${filters.tagMode === "any" ? "checked" : ""}> qualquer tag</label>
+        <label class="radio-row"><input type="radio" name="pmf-tagmode" value="all" ${filters.tagMode === "all" ? "checked" : ""}> todas as tags</label>` : ""}
+      </div>` : ""}
+      ${presets.length ? `
+      <div class="preset-row">
+        <span class="hint">Presets:</span>
+        ${presets.map((p) => `<button type="button" class="btn btn-sm btn-ghost preset-chip" data-preset-attribute="${p.attributeId}" data-preset-operator="${p.operator}" data-preset-value="${p.value}">${esc(p.label)}</button>`).join("")}
+      </div>` : ""}
+      <div class="attribute-filters">
+        ${filters.attributeFilters.map((f, i) => renderAttrFilterRow(attrs, f, i)).join("")}
+        <div class="rule-builder-actions">
+          <button type="button" class="btn btn-sm" id="pmf-add-criteria" ${attrs.length ? "" : "disabled"}>+ Adicionar critério</button>
+        </div>
+      </div>`;
+  }
+
+  const renderRow = (result) => {
+    const p = result.persona;
+    const matchChips = result.matches.map((m) => `<span class="tag">${esc(PF.describeAttributeMatch(m))}</span>`).join("");
+    return `
+      <label class="population-member-row">
+        <input type="checkbox" data-member="${p.id}" ${selectedIds.has(p.id) ? "checked" : ""}>
+        <div class="pmr-main">
+          <div class="pmr-top">
             <span class="mono faint small">${esc(p.code || "—")}</span>
-            <span>${esc(p.name)}</span>
-            <span class="faint small" style="margin-left:auto">${D.PERSONA_STATUS[p.status]}</span>
-          </label>`).join("")}
-      </div>`,
-    onSubmit: async (form) => {
-      pop.personaIds = $$("[data-member]:checked", form).map((c) => c.dataset.member);
-      await S.savePopulation(pop);
-      toast("Membros atualizados", "ok");
-      renderRoute();
-    },
+            <span class="pmr-name">${esc(p.name) || "Sem nome"}</span>
+            ${result.adherenceScore != null ? `<span class="badge accent" title="Aderência aos critérios de atributo (apenas para ordenação)">${Math.round(result.adherenceScore * 100)}% aderência</span>` : ""}
+          </div>
+          ${p.shortDescription ? `<p class="faint small pmr-desc">${esc(p.shortDescription)}</p>` : ""}
+          ${(p.tags || []).length ? `<div class="tags">${p.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
+          ${matchChips ? `<div class="match-values">${matchChips}</div>` : ""}
+        </div>
+      </label>`;
+  };
+
+  function renderSummary(results) {
+    summaryEl.innerHTML = `
+      <span class="badge neutral">${activePersonas().length} disponíveis</span>
+      <span class="badge accent">${results.length} nos filtros</span>
+      <span class="badge ok">${selectedIds.size} selecionadas</span>
+      <div class="fs-actions">
+        <button type="button" class="btn btn-sm" id="pmf-select-visible" ${results.length ? "" : "disabled"}>Selecionar visíveis</button>
+        <button type="button" class="btn btn-sm btn-ghost" id="pmf-remove-visible" ${results.length ? "" : "disabled"}>Remover visíveis</button>
+      </div>`;
+  }
+
+  function renderList(results) {
+    listEl.innerHTML = results.length === 0
+      ? `<div class="empty-state"><div class="big">Nenhuma persona corresponde aos filtros</div><p>Ajuste a busca ou os critérios acima.</p></div>`
+      : results.map(renderRow).join("");
+  }
+
+  function renderAll() {
+    const results = currentResults();
+    renderSummary(results);
+    renderList(results);
+    return results;
+  }
+
+  filtersEl.addEventListener("input", (e) => {
+    if (e.target.id === "pmf-search") { filters.search = e.target.value; renderAll(); return; }
+    if (e.target.matches("[data-af-field='value'], [data-af-field='min'], [data-af-field='max']")) {
+      const idx = Number(e.target.dataset.afIdx);
+      const field = e.target.dataset.afField;
+      filters.attributeFilters[idx][field] = e.target.value === "" ? null : Number(e.target.value);
+      renderAll();
+    }
   });
+
+  filtersEl.addEventListener("change", (e) => {
+    if (e.target.id === "pmf-membership") { filters.membership = e.target.value; renderAll(); return; }
+    if (e.target.id === "pmf-sort") { filters.sortBy = e.target.value; renderAll(); return; }
+    if (e.target.name === "pmf-tagmode") { filters.tagMode = e.target.value; renderAll(); return; }
+    if (e.target.matches("[data-af-field='attributeId']")) {
+      const idx = Number(e.target.dataset.afIdx);
+      filters.attributeFilters[idx].attributeId = e.target.value;
+      renderFiltersPanel();
+      renderAll();
+      return;
+    }
+    if (e.target.matches("[data-af-field='operator']")) {
+      const idx = Number(e.target.dataset.afIdx);
+      const f = filters.attributeFilters[idx];
+      const attribute = activeAttributes().find((a) => a.id === f.attributeId);
+      f.operator = e.target.value;
+      if (f.operator === "between") { f.min = attribute?.min ?? 0; f.max = attribute?.max ?? 100; delete f.value; }
+      else { f.value = attribute?.defaultValue ?? 50; delete f.min; delete f.max; }
+      renderFiltersPanel();
+      renderAll();
+    }
+  });
+
+  filtersEl.addEventListener("click", (e) => {
+    if (e.target.closest("#pmf-add-criteria")) {
+      const attrs = activeAttributes();
+      if (!attrs.length) return;
+      filters.attributeFilters.push({ attributeId: attrs[0].id, operator: "gte", value: attrs[0].defaultValue ?? 50 });
+      renderFiltersPanel();
+      renderAll();
+      return;
+    }
+    const removeBtn = e.target.closest("[data-af-remove]");
+    if (removeBtn) {
+      filters.attributeFilters.splice(Number(removeBtn.dataset.afRemove), 1);
+      renderFiltersPanel();
+      renderAll();
+      return;
+    }
+    const tagBtn = e.target.closest("[data-tag]");
+    if (tagBtn) {
+      const tag = tagBtn.dataset.tag;
+      const i = filters.tags.indexOf(tag);
+      if (i >= 0) filters.tags.splice(i, 1); else filters.tags.push(tag);
+      renderFiltersPanel();
+      renderAll();
+      return;
+    }
+    const presetBtn = e.target.closest("[data-preset-attribute]");
+    if (presetBtn) {
+      const newFilter = { attributeId: presetBtn.dataset.presetAttribute, operator: presetBtn.dataset.presetOperator, value: Number(presetBtn.dataset.presetValue) };
+      const existingIdx = filters.attributeFilters.findIndex((f) => f.attributeId === newFilter.attributeId);
+      if (existingIdx >= 0) filters.attributeFilters[existingIdx] = newFilter; else filters.attributeFilters.push(newFilter);
+      renderFiltersPanel();
+      renderAll();
+      return;
+    }
+    if (e.target.closest("#pmf-clear")) {
+      // "Limpar filtros" nunca toca em `selectedIds` — só reseta os critérios.
+      filters = PF.blankMemberFilters();
+      renderFiltersPanel();
+      renderAll();
+    }
+  });
+
+  listEl.addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-member]");
+    if (!cb) return;
+    if (cb.checked) selectedIds.add(cb.dataset.member); else selectedIds.delete(cb.dataset.member);
+    // Membership "selected"/"unselected" e ordenação "selecionados primeiro"
+    // dependem de `selectedIds` — só refazemos a lista inteira nesses casos
+    // para preservar posição de rolagem no caso comum (filtro "todos").
+    if (filters.membership !== "all" || filters.sortBy === "selected") renderAll();
+    else renderSummary(currentResults());
+  });
+
+  summaryEl.addEventListener("click", (e) => {
+    if (e.target.closest("#pmf-select-visible")) {
+      currentResults().forEach((r) => selectedIds.add(r.persona.id));
+      renderAll();
+    } else if (e.target.closest("#pmf-remove-visible")) {
+      currentResults().forEach((r) => selectedIds.delete(r.persona.id));
+      renderAll();
+    }
+  });
+
+  $(".modal-form", overlay).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    pop.personaIds = [...selectedIds];
+    await S.savePopulation(pop);
+    toast("Membros atualizados", "ok");
+    renderRoute();
+    close();
+  });
+
+  renderFiltersPanel();
+  renderAll();
+  $("#pmf-search", overlay).focus();
 }
+
 
 function viewPopulations(main) {
   main.innerHTML = `
