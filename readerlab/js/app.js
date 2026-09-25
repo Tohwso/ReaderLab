@@ -25,6 +25,7 @@ async function startApp() {
   await S.loadAll();
   await S.ensureSeedPersonas();
   await S.ensureSeedPopulation();
+  await S.ensureSeedFocusedPopulations();
   UI.renderApp();
 }
 

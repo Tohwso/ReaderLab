@@ -1,6 +1,7 @@
 // ============ ReaderLab — Estado e ações (repositórios) ============
 import * as db from "./db.js";
 import * as D from "./domain.js";
+import * as PC from "./personaCohorts.js";
 
 export const state = {
   personas: [],
@@ -98,6 +99,29 @@ export async function ensureSeedPopulation() {
   state.populations.push(pop);
   state.populations.sort((a, b) => a.name.localeCompare(b.name));
   return pop;
+}
+
+// 5 Populations seed focadas em perfis de leitura (Ávidos por Ação,
+// Contemplativos, Personagens/Emoção, Céticos de Coerência, Humor/Absurdo),
+// compostas por score determinístico (js/personaCohorts.js) sobre as R001–
+// R100. Idempotente por id fixo — uma Population já existente (mesmo id)
+// NUNCA é recalculada/sobrescrita, mesmo que o usuário já tenha editado seus
+// membros manualmente. Deve rodar depois de ensureSeedPersonas().
+export async function ensureSeedFocusedPopulations() {
+  const eligible = PC.filterEligiblePersonas(state.personas, D.SEED_PERSONA_CODES);
+  const created = [];
+  for (const def of PC.SEED_FOCUSED_POPULATION_DEFS) {
+    if (PC.isPopulationAlreadySeeded(state.populations, def.id)) continue;
+    const cohort = PC.COHORT_DEFINITIONS[def.cohortKey];
+    const top = PC.computeFocusedPopulationMembers({ personas: eligible, attributes: state.attributes, cohort, size: def.size });
+    const t = D.nowISO();
+    const pop = { id: def.id, name: def.name, description: def.description, personaIds: top.map((r) => r.personaId), createdAt: t, updatedAt: t };
+    await db.put("populations", pop);
+    state.populations.push(pop);
+    created.push(pop);
+  }
+  if (created.length) state.populations.sort((a, b) => a.name.localeCompare(b.name));
+  return created;
 }
 
 // --------------------------------------------------------------- genéricos
@@ -354,6 +378,7 @@ export async function resetToSeeds() {
   await loadAll();
   await ensureSeedPersonas();
   await ensureSeedPopulation();
+  await ensureSeedFocusedPopulations();
 }
 
 // ------------------------------------------------------------------- CSV
