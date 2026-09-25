@@ -1014,9 +1014,11 @@ function membersModal(pop) {
       <div class="modal-head"><h3>Membros — ${esc(pop.name)}</h3><button type="button" class="btn btn-ghost btn-sm" data-close>✕</button></div>
       <form class="modal-form" novalidate>
         <div class="modal-body">
-          <div class="population-member-filters" id="pmf-filters"></div>
-          <div class="filter-summary" id="pmf-summary"></div>
-          <div class="population-member-list" id="pmf-list"></div>
+          <div class="population-member-body">
+            <div class="population-member-filters" id="pmf-filters"></div>
+            <div class="filter-summary" id="pmf-summary"></div>
+            <div class="population-member-list" id="pmf-list"></div>
+          </div>
         </div>
         <div class="modal-foot">
           <button type="button" class="btn" data-close>Cancelar</button>

@@ -224,23 +224,30 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .modal {
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px;
   width: 100%; max-width: 560px; box-shadow: var(--shadow); max-height: 90vh; display: flex; flex-direction: column;
+  overflow: hidden;
 }
 .modal.wide { max-width: 720px; }
 .modal.xwide { max-width: 920px; }
-.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--line-soft); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--line-soft); flex: none; }
 .modal-head h3 { font-size: 16px; }
-.modal-body { padding: 18px 20px; overflow-y: auto; }
-.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--line-soft); }
+/* .modal-form é o único filho flexível de .modal (fica com head/foot fixos e
+   body ocupando o espaço restante) — min-height:0 é o que permite o
+   overflow-y:auto do .modal-body encolher e rolar em vez de vazar para
+   fora da borda do modal quando o conteúdo é alto (ex.: membersModal). */
+.modal-form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.modal-body { padding: 18px 20px; overflow-y: auto; flex: 1; min-height: 0; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--line-soft); flex: none; }
 
 /* ============ Seletor de membros de Population (filtro de Personas) ============ */
-.population-member-filters { border: 1px solid var(--line-soft); border-radius: 9px; padding: 12px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px; }
+.population-member-body { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 10px; }
+.population-member-filters { border: 1px solid var(--line-soft); border-radius: 9px; padding: 12px; flex: none; display: flex; flex-direction: column; gap: 10px; }
 .pmf-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .attribute-filters { display: flex; flex-direction: column; gap: 6px; }
 .attribute-filter-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .attribute-filter-row select, .attribute-filter-row input[type="number"] { width: auto; min-width: 110px; }
-.filter-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.filter-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none; }
 .filter-summary .fs-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
-.population-member-list { max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; border: 1px solid var(--line-soft); border-radius: 9px; padding: 6px; }
+.population-member-list { flex: 1; min-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; border: 1px solid var(--line-soft); border-radius: 9px; padding: 6px; }
 .population-member-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 9px; border-radius: 8px; cursor: pointer; }
 .population-member-row:hover { background: var(--bg-3); }
 .population-member-row input[type="checkbox"] { margin-top: 3px; width: auto; flex: none; }
