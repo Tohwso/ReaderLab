@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "readerlab/**"
+      - "supabase/functions/**"
+      - ".github/workflows/**"
+      - "scripts/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "readerlab/**"
+      - "supabase/functions/**"
+      - ".github/workflows/**"
+      - "scripts/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Run test suite
+        run: node scripts/run-tests.mjs

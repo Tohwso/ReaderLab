@@ -154,6 +154,24 @@ a branch e a pasta `/readerlab`, ou use uma GitHub Action que copie apenas
 esse diretório para `gh-pages`). Não publique `supabase/` — é código de
 backend (schema SQL e Edge Function), não faz parte do site estático.
 
+## Testes
+
+Toda a suíte (`**/*.test.mjs`, sem framework externo — Node puro) roda
+com:
+
+```
+node scripts/run-tests.mjs
+```
+
+O GitHub Actions ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml))
+executa exatamente esse mesmo comando em todo push/PR para `main` que
+toque em `readerlab/`, `supabase/functions/`, `scripts/` ou nos próprios
+workflows. O deploy do Pages
+([`.github/workflows/deploy-pages.yml`](./.github/workflows/deploy-pages.yml))
+tem um job `test` (o mesmo `scripts/run-tests.mjs`) do qual o job `deploy`
+depende via `needs: test` — se a suíte falhar, o deploy não roda. O deploy
+da Edge Function do Supabase continua manual, fora deste pipeline.
+
 ## Autenticação
 
 ReaderLab é uma aplicação privada e autenticada: não há cadastro público.
