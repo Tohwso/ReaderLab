@@ -1,7 +1,7 @@
 // ============ ReaderLab — Interface (views e componentes) ============
 import * as S from "./store.js";
 import * as D from "./domain.js";
-import { persistenceMode, signOut } from "./db.js";
+import { persistenceMode, signOut, getSession } from "./db.js";
 import { getLLMConfig } from "./llm/provider.js";
 import { estimateTokensConservative } from "./llm/tokenEstimate.js";
 import { DEFAULT_EXPECTED_READER_OUTPUT_TOKENS, DEFAULT_EXPECTED_ANALYST_OUTPUT_TOKENS, ANALYST_TARGET_PROMPT_CHARS } from "./config.js";
@@ -12,6 +12,8 @@ import { kimiRateLimitManager } from "./llm/rateLimitManager.js";
 import { SEGMENT_RULE_OPS, filterPersonasBySegment, computeQuestionStats, computeReactionAggregates, collectQuestionAnswers, computeBooleanStats, computeChoiceStats } from "./analytics/populationMetrics.js";
 import { runPopulationAnalysis } from "./analysisEngine.js";
 import * as PF from "./personaFilter.js";
+import { getThemePreference, setThemePreference } from "./theme.js";
+
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -29,6 +31,32 @@ const fmtDuration = (a, b) => {
 };
 const options = (obj, selected) =>
   Object.entries(obj).map(([v, l]) => `<option value="${v}" ${v === selected ? "selected" : ""}>${l}</option>`).join("");
+
+// ------------------------------------------------------------- Ícones (SVG)
+// Conjunto pequeno e monocromático, inline (sem biblioteca externa/emojis)
+// — usado na navegação e em ações principais (seção 9 do redesign visual).
+const ICON_PATHS = {
+  grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.2"/>',
+  users: '<circle cx="9" cy="8.5" r="3"/><path d="M2.5 20c0-3.6 2.9-6.5 6.5-6.5s6.5 2.9 6.5 6.5"/><path d="M16 8.8a2.6 2.6 0 1 1 0 5.2"/><path d="M15.5 13.6c2.4.4 4.2 2.2 4.2 4.4"/>',
+  user: '<circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-3.6 3.1-6.5 7-6.5s7 2.9 7 6.5"/>',
+  activity: '<path d="M3 12h4l2-7 4 14 2-7h6"/>',
+  clipboard: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3.3A1.3 1.3 0 0 1 10.3 2h3.4A1.3 1.3 0 0 1 15 3.3V4"/><path d="M9 11h6M9 15h6"/>',
+  sliders: '<path d="M4 6h6M14 6h6M4 12h11M19 12h1M4 18h2M10 18h10"/><circle cx="12" cy="6" r="2"/><circle cx="17" cy="12" r="2"/><circle cx="8" cy="18" r="2"/>',
+  spark: '<path d="M12 3v4M12 17v4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M2 12h4M18 12h4M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/>',
+  tag: '<path d="M3 11.2V4.8A1.8 1.8 0 0 1 4.8 3h6.4a1.8 1.8 0 0 1 1.3.5l8 8a1.8 1.8 0 0 1 0 2.6l-6.4 6.4a1.8 1.8 0 0 1-2.6 0l-8-8A1.8 1.8 0 0 1 3 11.2z"/><circle cx="7.6" cy="7.6" r="1.2"/>',
+  database: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
+  sun: '<circle cx="12" cy="12" r="3.6"/><path d="M12 2.5v2.2M12 19.3v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.4 19.6L6 18M18 6l1.6-1.6"/>',
+  moon: '<path d="M20 14.2A8.3 8.3 0 1 1 9.8 4a6.8 6.8 0 0 0 10.2 10.2z"/>',
+  monitor: '<rect x="3" y="4.5" width="18" height="12" rx="1.4"/><path d="M8 20h8M12 16.5V20"/>',
+  play: '<path d="M6.5 4.2v15.6l13-7.8-13-7.8z"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  close: '<path d="M5 5l14 14M19 5L5 19"/>',
+};
+function icon(name, cls = "icon") {
+  const path = ICON_PATHS[name];
+  if (!path) return "";
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+}
 
 // ------------------------------------------------------------------ Login
 export function renderLogin({ onSubmit }) {
@@ -106,7 +134,9 @@ function openModal({ title, body, onSubmit, submitLabel = "Salvar", wide = false
       </form>
     </div>`;
   document.body.appendChild(overlay);
-  const close = () => overlay.remove();
+  const close = () => { document.removeEventListener("keydown", onKeydown); overlay.remove(); };
+  const onKeydown = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKeydown);
   overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
   $$("[data-close]", overlay).forEach((b) => b.addEventListener("click", close));
   $(".modal-form", overlay).addEventListener("submit", (e) => {
@@ -129,16 +159,22 @@ function download(filename, content, mime = "application/json") {
 }
 
 // ----------------------------------------------------------------- Layout
-const NAV = [
-  ["#/dashboard", "Dashboard", null],
-  ["#/personas", "Personas", "personas"],
-  ["#/atributos", "Atributos", "attributes"],
-  ["#/reacoes", "Reações", "reactions"],
-  ["#/pesquisas", "Pesquisas", "surveys"],
-  ["#/execucoes", "Execuções", "runs"],
-  ["#/populacoes", "Populações", "populations"],
-  ["#/tags", "Tags", "tags"],
-  ["#/dados", "Dados", null],
+// Grupos de navegação (seção 8 do redesign visual) — só reorganização
+// visual; hrefs/rotas idênticos aos anteriores.
+const NAV_GROUPS = [
+  { label: "Visão geral", items: [["#/dashboard", "Dashboard", null, "grid"]] },
+  { label: "Laboratório", items: [
+    ["#/populacoes", "Populações", "populations", "users"],
+    ["#/personas", "Personas", "personas", "user"],
+    ["#/execucoes", "Execuções", "runs", "activity"],
+  ] },
+  { label: "Configuração", items: [
+    ["#/pesquisas", "Pesquisas", "surveys", "clipboard"],
+    ["#/atributos", "Atributos", "attributes", "sliders"],
+    ["#/reacoes", "Reações", "reactions", "spark"],
+    ["#/tags", "Tags", "tags", "tag"],
+  ] },
+  { label: "Sistema", items: [["#/dados", "Dados", null, "database"]] },
 ];
 const countFor = (key) =>
   key === "personas" ? S.state.personas.length
@@ -149,36 +185,71 @@ const countFor = (key) =>
   : key === "populations" ? S.state.populations.length
   : key === "tags" ? S.state.tags.length : null;
 
+// Rotas que se beneficiam de mais largura (telas analíticas) ou de uma
+// coluna mais estreita e confortável para leitura (seção 6).
+const WIDE_ROUTES = new Set(["dashboard", "populacoes", "population-runs"]);
+const READING_ROUTES = new Set(["execucoes"]);
+
+function themeToggleHTML() {
+  const pref = getThemePreference();
+  const opt = (value, name, label) => `<button type="button" data-theme-choice="${value}" class="${pref === value ? "active" : ""}" title="${label}" aria-label="${label}">${icon(name, "icon-sm")}</button>`;
+  return `<div class="theme-toggle" id="theme-toggle" role="group" aria-label="Tema">
+    ${opt("light", "sun", "Tema claro")}
+    ${opt("dark", "moon", "Tema escuro")}
+    ${opt("system", "monitor", "Acompanhar o sistema")}
+  </div>`;
+}
+
 export function renderApp() {
+  const session = getSession();
+  const email = session?.user?.email || "";
+  const initial = (email[0] || "?").toUpperCase();
   $("#app").innerHTML = `
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">R</div>
-          <div><div class="brand-name">ReaderLab</div><div class="brand-sub">Synthetic Readers</div></div>
+          <div><div class="brand-name">ReaderLab</div><div class="brand-sub">Laboratório de leitura sintética</div></div>
         </div>
-        <div class="nav-section">Laboratório</div>
         <nav id="nav">
-          ${NAV.map(([href, label, key]) => `
-            <a class="nav-item" href="${href}" data-nav="${href}">
-              <span>${label}</span>${key !== null ? `<span class="count">${countFor(key)}</span>` : ""}
-            </a>`).join("")}
+          ${NAV_GROUPS.map((group) => `
+            <div class="nav-group">
+              <div class="nav-section">${group.label}</div>
+              ${group.items.map(([href, label, key, iconName]) => `
+                <a class="nav-item" href="${href}" data-nav="${href}">
+                  ${icon(iconName, "nav-icon")}
+                  <span>${label}</span>${key !== null ? `<span class="count">${countFor(key)}</span>` : ""}
+                </a>`).join("")}
+            </div>`).join("")}
         </nav>
         <div class="sidebar-foot">
-          Backend: Supabase<br>LLM: proxy seguro (Edge Function)
-          <div style="margin-top:10px"><button type="button" class="btn btn-ghost btn-sm" id="logout-btn">Sair</button></div>
+          <div class="account-row">
+            <div class="account-avatar">${esc(initial)}</div>
+            <div class="account-meta">
+              <div class="account-name" title="${esc(email)}">${esc(email || "Conta")}</div>
+              <div class="account-role">Conta</div>
+            </div>
+          </div>
+          <div class="cluster" style="justify-content:space-between;padding:8px 6px 0">
+            ${themeToggleHTML()}
+            <button type="button" class="btn btn-ghost btn-sm" id="logout-btn">Sair</button>
+          </div>
         </div>
       </aside>
-      <div class="main-col">
+      <div class="main-col" id="main-col">
         ${persistenceMode !== "supabase" ? `
         <div class="info-box warn" style="margin-bottom:18px">
           <span>⚠</span>
-          <span><b>Backend indisponível</b> — não foi possível confirmar a conexão com o Supabase. Os dados podem não estar sendo persistidos. Verifique js/config.js e recarregue.</span>
+          <span><b>Backend indisponível</b> — não foi possível confirmar a conexão com o Supabase. Os dados podem não estar sendo persistidos. Verifique a área <a href="#/dados">Dados</a> e recarregue.</span>
         </div>` : ""}
         <main class="main" id="main"></main>
       </div>
     </div>`;
   $("#logout-btn").addEventListener("click", () => signOut());
+  $$("[data-theme-choice]", $("#theme-toggle")).forEach((b) => b.addEventListener("click", () => {
+    setThemePreference(b.dataset.themeChoice);
+    $$("[data-theme-choice]", $("#theme-toggle")).forEach((x) => x.classList.toggle("active", x === b));
+  }));
   window.addEventListener("hashchange", renderRoute);
   renderRoute();
 }
@@ -199,6 +270,11 @@ export function renderRoute() {
   const param = parts[1] ? decodeURIComponent(parts[1]) : null;
   const main = $("#main");
   if (!main) return;
+  const mainCol = $("#main-col");
+  if (mainCol) {
+    mainCol.classList.toggle("content-wide", WIDE_ROUTES.has(route));
+    mainCol.classList.toggle("content-reading", READING_ROUTES.has(route) && !!param);
+  }
   window.scrollTo(0, 0);
   if (route === "personas" && param) return viewPersonaForm(main, param);
   switch (route) {
@@ -223,12 +299,48 @@ function pageHead(title, sub, actions = "") {
   return `<div class="page-head"><div><h1>${title}</h1>${sub ? `<p class="sub">${sub}</p>` : ""}</div><div class="head-actions">${actions}</div></div>`;
 }
 
+function stepTitle(n, label) {
+  return `<div class="step-title"><span class="step-num">${n}</span><span class="step-label">${esc(label)}</span></div>`;
+}
+
 function statusBadge(status) {
   const cls = status === "ativa" ? "ok" : status === "arquivada" ? "warn" : "neutral";
-  return `<span class="badge ${cls}">${D.PERSONA_STATUS[status] || esc(status)}</span>`;
+  return `<span class="badge ${cls}"><span class="dot"></span>${D.PERSONA_STATUS[status] || esc(status)}</span>`;
 }
 
 // ============================================================== DASHBOARD
+function recentActivity(limit = 6) {
+  const items = [];
+  for (const r of S.state.runs) {
+    items.push({
+      date: r.createdAt, href: `#/execucoes/${r.id}`, iconName: "activity",
+      title: r.title || "(sem título)",
+      meta: personaLabel(r.personaId, r.executionSnapshot?.persona),
+      model: r.model, badge: runStatusBadge(r.status),
+    });
+  }
+  for (const pr of S.state.populationRuns) {
+    const pop = S.state.populations.find((p) => p.id === pr.populationId) || pr.executionSnapshot?.population;
+    items.push({
+      date: pr.createdAt, href: `#/population-runs/${pr.id}`, iconName: "users",
+      title: pr.title || "(sem título)",
+      meta: pop ? pop.name : "—",
+      model: pr.model, badge: populationRunStatusBadge(pr.status),
+    });
+  }
+  for (const ar of S.state.analysisRuns) {
+    const pr = S.state.populationRuns.find((p) => p.id === ar.populationRunId);
+    items.push({
+      date: ar.createdAt, href: `#/population-runs/${ar.populationRunId}?tab=analise`, iconName: "spark",
+      title: "Research Analyst",
+      meta: pr ? (pr.title || "(sem título)") : "—",
+      model: ar.model, badge: `<span class="badge ${ar.status === "COMPLETED" ? "ok" : ar.status === "FAILED" ? "bad" : "accent"}"><span class="dot"></span>${D.ANALYSIS_RUN_STATUS[ar.status] || esc(ar.status)}</span>`,
+    });
+  }
+  items.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  return items.slice(0, limit);
+}
+
 function viewDashboard(main) {
   const stats = [
     ["Personas", S.state.personas.length, "#/personas", "leitores sintéticos modelados"],
@@ -238,20 +350,55 @@ function viewDashboard(main) {
     ["Execuções de população", S.state.populationRuns.length, "#/populacoes", "PopulationRuns já executadas"],
   ];
   const recent = S.state.personas.slice(0, 5);
+  const focusedPops = S.state.populations.filter((p) => p.id.startsWith("pop_seed_") && p.id !== D.SEED_POPULATION_ID);
+  const activity = recentActivity(6);
   main.innerHTML = `
-    ${pageHead("Dashboard", "Laboratório de leitores sintéticos — modele Personas e Pesquisas, execute leituras individuais ou populacionais, e explore os resultados via Population Analytics, Segmentos e Research Analyst.")}
-    <div class="info-box" style="margin-bottom:20px">
-      <span>ⓘ</span>
-      <span><b>Princípio central:</b> o ReaderLab prioriza divergência e diversidade de comportamento — não consenso artificial entre agentes. As estatísticas de uma execução (média, mediana, desvio, divergência, segmentos) são sempre calculadas pelo próprio ReaderLab; o Research Analyst apenas interpreta, com IA, esses números já calculados.</span>
+    <div class="dash-hero">
+      <div>
+        <div class="dash-hero-title">ReaderLab</div>
+        <p class="dash-hero-sub">Laboratório de leitura sintética — modele Personas e Pesquisas, execute leituras individuais ou populacionais, e explore os resultados via Population Analytics, Segmentos e Research Analyst.</p>
+      </div>
+      <div class="dash-hero-actions">
+        <a class="btn" href="#/execucoes/nova">Nova leitura</a>
+        <a class="btn btn-primary" href="#/populacoes">${icon("play", "icon-sm")} Executar população</a>
+      </div>
     </div>
     <div class="cards" style="margin-bottom:26px">
       ${stats.map(([label, num, href, hint]) => `
-        <a class="card stat-card" href="${href}">
+        <a class="card card-stat stat-card" href="${href}">
           <span class="stat-num">${num}</span>
           <span class="stat-label">${label}</span>
           <span class="stat-hint">${hint}</span>
         </a>`).join("")}
     </div>
+    <div class="section-title">Painéis de leitores</div>
+    ${focusedPops.length === 0
+      ? `<p class="muted small" style="margin-bottom:26px">Nenhum painel de leitores focado disponível ainda.</p>`
+      : `<div class="panel-grid" style="margin-bottom:26px">${focusedPops.map((pop) => `
+        <div class="card card-compact panel-card">
+          <div class="panel-card-title">${esc(pop.name)}</div>
+          <div class="panel-card-meta">${pop.personaIds.length} leitor(es)</div>
+          <div class="card-actions" style="border-top:none;padding-top:0;margin-top:0">
+            <a class="btn btn-sm" href="#/populacoes">Abrir</a>
+            <a class="btn btn-sm btn-primary" href="#/populacoes/${pop.id}/executar">Executar</a>
+          </div>
+        </div>`).join("")}</div>`}
+    <div class="section-title">Atividade recente</div>
+    ${activity.length === 0
+      ? `<p class="muted small" style="margin-bottom:22px">Nenhuma execução registrada ainda.</p>`
+      : `<div class="activity-list" style="margin-bottom:22px">${activity.map((a) => `
+        <a class="activity-row" href="${a.href}">
+          <div class="activity-icon">${icon(a.iconName, "icon-sm")}</div>
+          <div class="activity-main">
+            <div class="activity-title">${esc(a.title)}</div>
+            <div class="activity-meta">${esc(a.meta)} · ${fmtDate(a.date)}${a.model ? " · " + esc(a.model) : ""}</div>
+          </div>
+          <div class="activity-side">${a.badge}</div>
+        </a>`).join("")}</div>`}
+    <details class="disclosure" style="margin-bottom:24px">
+      <summary>Como interpretar os resultados</summary>
+      <div class="disclosure-body"><b>Princípio central:</b> o ReaderLab prioriza divergência e diversidade de comportamento — não consenso artificial entre agentes. As estatísticas de uma execução (média, mediana, desvio, divergência, segmentos) são sempre calculadas pelo próprio ReaderLab; o Research Analyst apenas interpreta, com IA, esses números já calculados.</div>
+    </details>
     <div class="section-title">Atalhos</div>
     <div class="toolbar" style="margin-bottom:26px">
       <a class="btn btn-primary" href="#/personas/nova">+ Nova persona</a>
@@ -272,16 +419,31 @@ function viewDashboard(main) {
 // =============================================================== PERSONAS
 let personaFilter = { q: "", status: "", tag: "", sort: "recentes" };
 
+// 3 atributos mais característicos de uma Persona (seção 19) — determinado
+// deterministicamente pela distância normalizada ao ponto neutro
+// (defaultValue) do Attribute, nunca via LLM nem pelos 4 primeiros do
+// catálogo. Puramente de apresentação — não altera nenhum dado persistido.
+function topDistinctiveAttributes(persona, attributes, n = 3) {
+  const norm = (v, a) => (a.max > a.min ? ((v - a.min) / (a.max - a.min)) * 100 : 50);
+  const scored = attributes
+    .filter((a) => a.status === "ativa" && persona.attributeValues && persona.attributeValues[a.id] != null)
+    .map((a) => {
+      const raw = persona.attributeValues[a.id];
+      const mid = norm(a.defaultValue ?? (a.min + a.max) / 2, a);
+      return { attribute: a, raw, distance: Math.abs(norm(raw, a) - mid) };
+    });
+  scored.sort((x, y) => y.distance - x.distance || x.attribute.name.localeCompare(y.attribute.name));
+  return scored.slice(0, n);
+}
+
 function personaCard(p) {
-  const attrs = S.state.attributes.filter((a) => a.status === "ativa").slice(0, 4);
-  const bars = attrs.map((a) => {
-    const v = p.attributeValues ? p.attributeValues[a.id] : null;
-    if (v == null) return "";
+  const distinctive = topDistinctiveAttributes(p, S.state.attributes, 3);
+  const bars = distinctive.map(({ attribute: a, raw: v }) => {
     const pct = a.max > a.min ? Math.round(((v - a.min) / (a.max - a.min)) * 100) : 0;
     return `<div class="attr-bar-row"><span class="lbl" title="${esc(a.name)}">${esc(a.name)}</span><span class="bar"><i style="width:${pct}%"></i></span><span class="val">${v}</span></div>`;
   }).join("");
   return `
-    <div class="card persona-card" data-persona="${p.id}">
+    <div class="card card-interactive persona-card" data-persona="${p.id}">
       <div class="persona-top">
         ${p.code ? `<span class="persona-code">${esc(p.code)}</span>` : ""}
         <div style="min-width:0">
@@ -1027,7 +1189,9 @@ function membersModal(pop) {
       </form>
     </div>`;
   document.body.appendChild(overlay);
-  const close = () => overlay.remove();
+  const close = () => { document.removeEventListener("keydown", onKeydown); overlay.remove(); };
+  const onKeydown = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKeydown);
   overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
   $$("[data-close]", overlay).forEach((b) => b.addEventListener("click", close));
 
@@ -1264,10 +1428,12 @@ function viewPopulations(main) {
       : `<div class="cards">${S.state.populations.map((pop) => {
         const popRuns = S.getPopulationRunsForPopulation(pop.id);
         return `
-        <div class="card persona-card">
-          <div class="persona-name">${esc(pop.name)}</div>
+        <div class="card card-interactive persona-card">
+          <div class="pop-card-head">
+            <div class="persona-name">${esc(pop.name)}</div>
+            <span class="badge accent">${pop.personaIds.length} persona(s)</span>
+          </div>
           ${pop.description ? `<p class="persona-desc">${esc(pop.description)}</p>` : ""}
-          <div class="q-meta"><span class="badge accent">${pop.personaIds.length} persona(s)</span></div>
           <div class="pop-members">
             ${pop.personaIds.slice(0, 8).map((id) => {
               const p = S.state.personas.find((x) => x.id === id);
@@ -1277,7 +1443,7 @@ function viewPopulations(main) {
           </div>
           <div class="card-actions">
             <button class="btn btn-sm btn-primary" data-exec="${pop.id}" ${pop.personaIds.length ? "" : "disabled"}>Executar população</button>
-            <button class="btn btn-sm" data-members="${pop.id}">Editar membros</button>
+            <button class="btn btn-sm primary-action" data-members="${pop.id}">Editar membros</button>
             <button class="btn btn-sm btn-ghost" data-rename="${pop.id}">Renomear</button>
             <button class="btn btn-sm btn-ghost btn-danger" data-del="${pop.id}">Excluir</button>
           </div>
@@ -1346,7 +1512,7 @@ function viewExecutePopulation(main, popId) {
         <input type="text" id="pr-title" placeholder="Capítulo 1 — leitura em população">
       </div>
 
-      <div class="section-title">Texto</div>
+      ${stepTitle(1, "Texto")}
       <div class="field">
         <label>Cole o texto ou envie um arquivo (.txt / .md)</label>
         <textarea id="pr-text" class="tall" placeholder="Cole aqui o texto a ser lido por todas as personas desta população…"></textarea>
@@ -1356,6 +1522,7 @@ function viewExecutePopulation(main, popId) {
         </div>
       </div>
 
+      ${stepTitle(2, "Pesquisa")}
       <div class="field">
         <label>Pesquisa <span class="req">*</span></label>
         <select id="pr-survey">
@@ -1364,6 +1531,7 @@ function viewExecutePopulation(main, popId) {
         </select>
       </div>
 
+      ${stepTitle(3, "Modelo")}
       <div class="field">
         <label>Modo de execução</label>
         <label class="checkbox-row" style="padding-left:0">
@@ -1375,7 +1543,7 @@ function viewExecutePopulation(main, popId) {
         </label>
       </div>
 
-      <div class="section-title">Resumo</div>
+      ${stepTitle(4, "Executar")}
       <div class="card" style="margin-bottom:16px">
         <p><b>${members.length}</b> persona(s) serão executadas, sequencialmente e de forma isolada entre si.</p>
         <div class="tags" style="margin-top:10px">
@@ -1479,7 +1647,7 @@ const RUN_STATE_META = {
 
 function populationRunStatusBadge(status) {
   const cls = { PENDING: "neutral", RUNNING: "accent", COMPLETED: "ok", PARTIAL: "warn", FAILED: "bad", CANCELLED: "neutral" }[status] || "neutral";
-  return `<span class="badge ${cls}">${esc(D.POPULATION_RUN_STATUS[status] || status)}</span>`;
+  return `<span class="badge ${cls}"><span class="dot"></span>${esc(D.POPULATION_RUN_STATUS[status] || status)}</span>`;
 }
 
 // Banner informativo (NUNCA um erro da população, ver rateLimitManager.js)
@@ -1856,7 +2024,7 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
                   const min = q.min ?? 0, max = q.max ?? 100;
                   const norm = max > min ? Math.max(0, Math.min(1, (val - min) / (max - min))) : 0;
                   const alpha = (0.08 + norm * 0.72).toFixed(2);
-                  return `<td class="heatmap-cell" style="background:rgba(79,142,247,${alpha})"
+                  return `<td class="heatmap-cell" style="background:rgba(var(--brand-rgb),${alpha})"
                     data-heatmap-cell
                     data-persona="${esc(persona.code ? persona.code + " — " : "")}${esc(persona.name)}"
                     data-question="${esc(q.text)}"
@@ -2185,7 +2353,7 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
     return `
       <div class="card" style="margin-bottom:16px">
         <div class="q-meta" style="margin-bottom:8px">
-          <span class="badge ${run.status === "COMPLETED" ? "ok" : run.status === "FAILED" ? "bad" : "accent"}">${esc(D.ANALYSIS_RUN_STATUS[run.status] || run.status)}</span>
+          <span class="badge ${run.status === "COMPLETED" ? "ok" : run.status === "FAILED" ? "bad" : "accent"}"><span class="dot"></span>${esc(D.ANALYSIS_RUN_STATUS[run.status] || run.status)}</span>
           <span class="mono small">${fmtDate(run.createdAt)}</span>
           <span class="faint">·</span>
           <span class="mono small">${esc(run.provider)} / ${esc(run.model)}</span>
@@ -2253,7 +2421,7 @@ function renderPopulationRunHub(main, popRun, { initialTab } = {}) {
               <div class="faint small">${fmtDate(a.createdAt)}</div>
             </div></div>
             <div class="pr-status-side">
-              <span class="badge ${a.status === "COMPLETED" ? "ok" : a.status === "FAILED" ? "bad" : "accent"}">${esc(D.ANALYSIS_RUN_STATUS[a.status] || a.status)}</span>
+              <span class="badge ${a.status === "COMPLETED" ? "ok" : a.status === "FAILED" ? "bad" : "accent"}"><span class="dot"></span>${esc(D.ANALYSIS_RUN_STATUS[a.status] || a.status)}</span>
               <button type="button" class="btn btn-sm ${selected && selected.id === a.id ? "btn-primary" : ""}" data-analysis-open="${a.id}">Abrir</button>
             </div>
           </div>`).join("")}
@@ -2723,7 +2891,12 @@ function viewData(main) {
     </div>
     <div class="section-title">Zona de cuidado</div>
     <div class="info-box warn"><span>⚠</span><span>Restaurar os dados de exemplo apaga <b>tudo</b> e recria o estado inicial: atributos, reações, pesquisas padrão, as 100 personas de exemplo (R001–R100) e a população "Painel Geral — 100 Leitores".</span></div>
-    <div style="margin-top:12px"><button class="btn btn-danger" id="reset-seeds">Restaurar dados de exemplo</button></div>`;
+    <div style="margin-top:12px"><button class="btn btn-danger" id="reset-seeds">Restaurar dados de exemplo</button></div>
+    <div class="section-title" style="margin-top:26px">Área técnica</div>
+    <div class="kv" style="flex-direction:column;gap:4px;font-size:12px">
+      <span>Backend: Supabase (${persistenceMode === "supabase" ? "conectado" : "indisponível"})</span>
+      <span>LLM: proxy seguro (Edge Function)</span>
+    </div>`;
 
   const stamp = new Date().toISOString().slice(0, 10);
   $("#ex-json").addEventListener("click", () => {
@@ -2774,7 +2947,7 @@ const surveyLabel = (id, snapshotSurvey) => {
 };
 const runStatusBadge = (status) => {
   const cls = { COMPLETED: "ok", FAILED: "bad", RUNNING: "accent", WAITING_RETRY: "warn", PENDING: "neutral" }[status] || "neutral";
-  return `<span class="badge ${cls}">${D.RUN_STATUS[status] || esc(status)}</span>`;
+  return `<span class="badge ${cls}"><span class="dot"></span>${D.RUN_STATUS[status] || esc(status)}</span>`;
 };
 
 function viewRuns(main) {
@@ -2826,7 +2999,7 @@ function viewNewRun(main) {
         <input type="text" id="rn-title" placeholder="Capítulo 1 — teste R010">
       </div>
 
-      <div class="section-title">Texto</div>
+      ${stepTitle(1, "Texto")}
       <div class="field">
         <label>Cole o texto ou envie um arquivo (.txt / .md)</label>
         <textarea id="rn-text" class="tall" placeholder="Cole aqui o capítulo, seção ou trecho a ser lido pela persona…"></textarea>
@@ -2836,6 +3009,7 @@ function viewNewRun(main) {
         </div>
       </div>
 
+      ${stepTitle(2, "Leitor e pesquisa")}
       <div class="form-grid">
         <div class="field">
           <label>Persona <span class="req">*</span></label>
@@ -2861,6 +3035,7 @@ function viewNewRun(main) {
         </label>
       </div>
 
+      ${stepTitle(3, "Modelo")}
       <div class="field">
         <label>Modo de execução</label>
         <label class="checkbox-row" style="padding-left:0">
@@ -2873,6 +3048,7 @@ function viewNewRun(main) {
         <span class="hint">Esta tela executa uma leitura com <b>uma</b> Persona. Para rodar a mesma Pesquisa com uma população inteira de leitores, use <a href="#/populacoes">Populações</a>.</span>
       </div>
 
+      ${stepTitle(4, "Executar")}
       <details class="card" style="margin-bottom:8px">
         <summary style="cursor:pointer;font-weight:650">Configurações avançadas</summary>
         <div class="form-grid" style="margin-top:14px">

@@ -19,7 +19,7 @@ const fmtDuration = (a, b) => {
 };
 const runStatusBadge = (status) => {
   const cls = { COMPLETED: "ok", FAILED: "bad", RUNNING: "accent", WAITING_RETRY: "warn", PENDING: "neutral" }[status] || "neutral";
-  return `<span class="badge ${cls}">${D.RUN_STATUS[status] || esc(status)}</span>`;
+  return `<span class="badge ${cls}"><span class="dot"></span>${D.RUN_STATUS[status] || esc(status)}</span>`;
 };
 const reactionPolarityBadge = (pol) => {
   const cls = pol === "positiva" ? "ok" : pol === "negativa" ? "bad" : "neutral";
@@ -42,7 +42,7 @@ function tryParseJSON(str) {
 function renderRunHeader(run, persona, survey, backContext) {
   const personaName = persona ? `${persona.code ? esc(persona.code) + " — " : ""}${esc(persona.name)}` : "(persona removida)";
   return `
-    <div class="card run-report-header">
+    <div class="card card-result run-report-header">
       ${backContext?.breadcrumb?.length ? `<div class="breadcrumb">${backContext.breadcrumb.map((b) => esc(b)).join(' <span class="faint">›</span> ')}</div>` : ""}
       <div class="run-report-head-top">
         <div>

@@ -29,11 +29,13 @@ function modelCardHtml(model, { estimatedInputTokens, estimatedOutputTokens, pop
   const total = populationSize > 1 && perCall ? { ...perCall, totalCost: perCall.totalCost * populationSize } : perCall;
   const historical = runs ? getHistoricalUsageStats({ purpose, modelId: model.id, runs }) : null;
   return `
-    <label class="card model-card ${selected ? "selected" : ""}" style="display:block;cursor:pointer;margin-bottom:10px">
-      <input type="radio" name="llm-model" value="${esc(model.id)}" ${selected ? "checked" : ""} style="margin-right:8px">
-      <strong>${esc(model.displayName)}</strong>
-      <span class="tags">${(model.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join(" ")}</span>
-      <div class="small muted" style="margin-top:4px">
+    <label class="card model-card ${selected ? "selected" : ""}">
+      <div class="model-card-head">
+        <input type="radio" name="llm-model" value="${esc(model.id)}" ${selected ? "checked" : ""}>
+        <span class="model-card-name">${esc(model.displayName)}</span>
+      </div>
+      <div class="tags">${(model.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join(" ")}</div>
+      <div class="small muted" style="margin-top:8px">
         Contexto: ${esc(String(model.contextTokens))} tokens ·
         Input: ${fmtPrice(model.pricing?.inputPerMillionTokens, model.pricing?.currency)} ·
         Output: ${fmtPrice(model.pricing?.outputPerMillionTokens, model.pricing?.currency)}

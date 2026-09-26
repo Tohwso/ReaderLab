@@ -2,8 +2,10 @@
 import * as db from "./db.js";
 import * as S from "./store.js";
 import * as UI from "./ui.js";
+import { initTheme } from "./theme.js";
 
 let appStarted = false;
+initTheme();
 
 function renderFatal(err) {
   console.error(err);
