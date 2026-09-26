@@ -134,15 +134,37 @@ function openModal({ title, body, onSubmit, submitLabel = "Salvar", wide = false
       </form>
     </div>`;
   document.body.appendChild(overlay);
-  const close = () => { document.removeEventListener("keydown", onKeydown); overlay.remove(); };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener("keydown", onKeydown);
+    overlay.remove();
+  };
   const onKeydown = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKeydown);
   overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
   $$("[data-close]", overlay).forEach((b) => b.addEventListener("click", close));
-  $(".modal-form", overlay).addEventListener("submit", (e) => {
+
+  const form = $(".modal-form", overlay);
+  const submitBtn = $('button[type="submit"]', overlay);
+  const submitBtnLabel = submitBtn ? submitBtn.textContent : "";
+  let submitting = false;
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const keep = onSubmit($(".modal-form", overlay), close);
-    if (keep !== false) close();
+    if (submitting) return;
+    submitting = true;
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Salvando…"; }
+    try {
+      const keep = await onSubmit(form, close);
+      if (keep !== false) close();
+    } catch (err) {
+      console.error(err);
+      toast("Não foi possível salvar. Tente novamente.", "bad");
+    } finally {
+      submitting = false;
+      if (!closed && submitBtn) { submitBtn.disabled = false; submitBtn.textContent = submitBtnLabel; }
+    }
   });
   const first = $("input, select, textarea", overlay);
   if (first) first.focus();

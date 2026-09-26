@@ -104,7 +104,6 @@
   --bad: var(--danger);
   --bad-soft: var(--danger-soft);
   --radius: var(--radius-md);
-  --radius-sm: var(--radius-sm);
   --shadow: var(--shadow-md);
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
